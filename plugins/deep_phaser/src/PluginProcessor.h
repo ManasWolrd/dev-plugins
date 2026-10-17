@@ -1,25 +1,28 @@
 #pragma once
-#include <pluginshared/juce_param_listener.hpp>
-#include <pluginshared/preset_manager.hpp>
+#include <array>
+#include <complex>
 #include <pluginshared/bpm_sync_lfo.hpp>
+#include <pluginshared/preset_manager.hpp>
 
 #include "deep_phaser.hpp"
+#include "global.hpp"
+#include "params.hpp"
 
 // ---------------------------------------- juce processor ----------------------------------------
-class DeepPhaserAudioProcessor final : public juce::AudioProcessor
-{
+class DeepPhaserAudioProcessor final : public juce::AudioProcessor {
 public:
     //==============================================================================
     DeepPhaserAudioProcessor();
     ~DeepPhaserAudioProcessor() override;
 
     //==============================================================================
-    void prepareToPlay (double sampleRate, int samplesPerBlock) override;
+    void prepareToPlay(double sampleRate, int samplesPerBlock) override;
     void releaseResources() override;
+    void reset() override;
 
-    bool isBusesLayoutSupported (const BusesLayout& layouts) const override;
+    bool isBusesLayoutSupported(const BusesLayout& layouts) const override;
 
-    void processBlock (juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     using AudioProcessor::processBlock;
 
     //==============================================================================
@@ -37,84 +40,24 @@ public:
     //==============================================================================
     int getNumPrograms() override;
     int getCurrentProgram() override;
-    void setCurrentProgram (int index) override;
-    const juce::String getProgramName (int index) override;
-    void changeProgramName (int index, const juce::String& newName) override;
+    void setCurrentProgram(int index) override;
+    const juce::String getProgramName(int index) override;
+    void changeProgramName(int index, const juce::String& newName) override;
 
     //==============================================================================
-    void getStateInformation (juce::MemoryBlock& destData) override;
-    void setStateInformation (const void* data, int sizeInBytes) override;
+    void getStateInformation(juce::MemoryBlock& destData) override;
+    void setStateInformation(const void* data, int sizeInBytes) override;
 
-    JuceParamListener param_listener_;
     std::unique_ptr<juce::AudioProcessorValueTreeState> value_tree_;
     std::unique_ptr<pluginshared::PresetManager> preset_manager_;
 
-    juce::AudioParameterInt* param_state_;
-    juce::AudioParameterFloat* param_fir_cutoff_;
-    juce::AudioParameterFloat* param_fir_coeff_len_;
-    juce::AudioParameterFloat* param_fir_side_lobe_;
-    juce::AudioParameterBool* param_fir_min_phase_;
-    juce::AudioParameterBool* param_fir_highpass_;
-    juce::AudioParameterFloat* param_feedback_;
-    juce::AudioParameterFloat* param_damp_pitch_;
-    juce::AudioParameterFloat* param_barber_phase_;
-    juce::AudioParameterBool* param_barber_enable_;
-    // true: from fir, false: from apf
-    juce::AudioParameterBool* param_feedback_style_;
-    juce::AudioParameterFloat* param_allpass_blend_;
-    juce::AudioParameterFloat* param_barber_stereo_;
-    juce::AudioParameterFloat* param_blend_range_;
-    juce::AudioParameterFloat* param_blend_phase_;
-    juce::AudioParameterFloat* param_drywet_;
+    deepphaser::Params params_;
+    deepphaser::Engine engine_;
 
-    std::atomic<bool> should_update_fir_{};
-    std::atomic<bool> have_new_coeff_{};
-
-    static constexpr size_t kSIMDMaxCoeffLen = ((kMaxCoeffLen + 3) / 4) * 4;
-
-    AllpassBuffer2 delay_;
-    // fir
-    alignas(16) std::array<float, kSIMDMaxCoeffLen> coeffs_{};
-    std::array<SimdType, kSIMDMaxCoeffLen / 4> last_coeffs_{};
-    std::array<float, kMaxCoeffLen> custom_coeffs_{};
-    std::array<float, kMaxCoeffLen> custom_spectral_gains{};
-    size_t coeff_len_{};
-    size_t coeff_len_div_4_{};
-    float fir_gain_{1.0f};
-
-    // allpass, basicly this is onepole allpass pole
-    inline static float const kMinPitch = qwqdsp::convert::Freq2Pitch(20.0f);
-    inline static float const kMaxPitch = qwqdsp::convert::Freq2Pitch(20000.0f);
-    float last_left_allpass_coeff_{};
-    float last_right_allpass_coeff_{};
-    size_t last_num_calc_apfs_{};
-    float blend_lfo_phase_{};
-
-    // feedback
-    SimdType feedback_lag_{};
-    float feedback_mul_from_apf_{};
-    float feedback_mul_from_fir_{1.0f};
-    qwqdsp_simd_element::OnePoleTPT<4> damp_;
-    float damp_lowpass_coeff_{1.0f};
-    float last_damp_lowpass_coeff_{1.0f};
-
-    // barberpole
-    qwqdsp_simd_element::StereoIIRHilbertDeeperCpx<4> hilbert_complex_;
-    qwqdsp_misc::ExpSmoother barber_phase_smoother_;
-    qwqdsp_oscillator::VicSineOsc barber_oscillator_;
-    size_t barber_osc_keep_amp_counter_{};
-    size_t barber_osc_keep_amp_need_{};
-
-    std::atomic<bool> is_using_custom_{};
-    qwqdsp_spectral::ComplexFftAdv complex_fft_;
-
-    pluginshared::BpmSyncLFO barber_lfo_state_;
-    pluginshared::BpmSyncLFO blend_lfo_state_;
-    
-    void Panic();
+    bool display_custom_{true};
 private:
-    void UpdateCoeff();
+    float barber_osc_phase_sync_{};
 
     //==============================================================================
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeepPhaserAudioProcessor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DeepPhaserAudioProcessor)
 };

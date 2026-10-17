@@ -1,191 +1,96 @@
 #pragma once
+#include <complex>
+#include <vector>
+
+#include "pluginshared/bpm_sync_ui.hpp"
 #include "pluginshared/component.hpp"
 #include "pluginshared/preset_panel.hpp"
-#include "pluginshared/bpm_sync_ui.hpp"
 
-#include "qwqdsp/spectral/real_fft_adv.hpp"
-#include "shared.hpp"
+#include "global.hpp"
+#include "params.hpp"
+#include "ui/pz_edit_layer.hpp"
+#include "ui/pz_response_layer.hpp"
 
 class DeepPhaserAudioProcessor;
 
-// ---------------------------------------- time prev ----------------------------------------
-class TimeView : public juce::Component {
+// ---------------------------------------- pzmap edit view ----------------------------------------
+// 双层编辑器容器：背景层 = 零极点原始幅度响应曲线（PzResponseLayer），
+// 交互层 = 零极点拖拽（PzEditLayer，置顶）。两层用同一绘图 bound，
+// x 轴均为归一化角频率 ω/π ∈ [PzEditLayer::kXMin, kXMax]；
+// 边距内画三组轴刻度：左侧 dB、右侧模长、底部 x。
+class PzmapView : public juce::Component {
 public:
-    TimeView(DeepPhaserAudioProcessor& p)
-        : p_(p)
-    {
-        addAndMakeVisible(title_);
-        reload_.onClick = [this] {
-            SendCoeffs();
-        };
-        reload_.setButtonText("reload");
-        addAndMakeVisible(reload_);
-
-        copy_.onClick = [this] {
-            CopyCoeffesToCustom();
-        };
-        copy_.setButtonText("copy");
-        addAndMakeVisible(copy_);
-
-        clear_.onClick = [this] {
-            ClearCustomCoeffs();
-        };
-        clear_.setButtonText("clear");
-        addAndMakeVisible(clear_);
-
-        display_custom_.setToggleState(true, juce::dontSendNotification);
-        addAndMakeVisible(display_custom_);
-        display_custom_.onStateChange = [this] {
-            RepaintTimeAndSpectralView();
-        };
-    }
+    explicit PzmapView(DeepPhaserAudioProcessor& p);
 
     void paint(juce::Graphics& g) override;
+    void resized() override;
 
-    void mouseDown(const juce::MouseEvent& e) override {
-        mouseDrag(e);
-    }
-
-    void mouseDrag(const juce::MouseEvent& e) override;
-
-    void mouseUp(const juce::MouseEvent& e) override;
-
-    void SendCoeffs();
-
-    void CopyCoeffesToCustom();
-
-    void ClearCustomCoeffs();
-
-    void resized() override {
-        auto b = getLocalBounds();
-        auto top = b.removeFromTop(static_cast<int>(title_.getFont().getHeight() * 1.5f));
-        reload_.setBounds(top.removeFromRight(60).reduced(1, 1));
-        copy_.setBounds(top.removeFromRight(50).reduced(1, 1));
-        clear_.setBounds(top.removeFromRight(50).reduced(1, 1));
-        display_custom_.setBounds(top.removeFromRight(70).reduced(1, 1));
-        title_.setBounds(top);
-    }
-
-    void UpdateGui();
-
+    void ReloadFromProcessor();
+    void SetNumSections(int n);
 private:
-    void RepaintTimeAndSpectralView();
+    // 极点间距校验（其它已放置极点），供提交回调使用
+    bool PoleSeparated(size_t idx, global::PolarPoint z) const;
+    // 提交 / 右键复位共用路径（含间距校验后写入 params）
+    void Commit(size_t idx, bool pole, global::PolarPoint z);
+    void ResetToDefault(size_t idx, bool pole);
+
+    static constexpr float kMinSep = 0.04f; // 极点最小间距（复平面距离）
+    static constexpr int kInsetLeft = 30;   // 左轴 dB 刻度边距
+    static constexpr int kInsetRight = 30;  // 右轴模长刻度边距
+    static constexpr int kInsetTop = 8;
+    static constexpr int kInsetBottom = 16; // 底部 x 刻度边距
 
     DeepPhaserAudioProcessor& p_;
-    juce::Label title_{"", "Time view"};
-    ui::FlatButton reload_;
-    ui::FlatButton copy_;
-    ui::FlatButton clear_;
-    ui::Switch display_custom_{"show ctm"};
-    std::array<float, kMaxCoeffLen + 1> coeff_buffer_{};
-
-    friend class SpectralView;
-};
-
-class SpectralView : public juce::Component {
-public:
-    SpectralView(TimeView& time)
-        : time_(time)
-    {
-        addAndMakeVisible(title_);
-        fft_.Init(kGainFFTSize);
-    }
-
-    void paint(juce::Graphics& g) override;
-
-    void resized() override {
-        auto b = getLocalBounds();
-        title_.setBounds(b.removeFromTop(static_cast<int>(title_.getFont().getHeight())));
-    }
-
-    void UpdateGui();
-
-    void mouseDown(const juce::MouseEvent& e) override {
-        mouseDrag(e);
-    }
-
-    void mouseDrag(const juce::MouseEvent& e) override;
-
-    void mouseUp(const juce::MouseEvent& e) override;
-
-private:
-    static constexpr size_t kGainFFTSize = 1024;
-    static constexpr size_t kGainNumBins = kGainFFTSize / 2 + 1;
-
-    TimeView& time_;
-    juce::Label title_{"", "Responce"};
-    std::array<float, kGainNumBins> gains_{};
-    float max_db_{};
-    float min_db_{};
-    qwqdsp_spectral::RealFftAdv fft_;
+    juce::Label title_{"", "pzmap"};
+    PzResponseLayer response_layer_;
+    PzEditLayer edit_layer_;
+    std::array<global::PolarPoint, global::kMaxSections> cached_poles_{};
+    std::array<global::PolarPoint, global::kMaxSections> cached_zeros_{};
 };
 
 // ---------------------------------------- editor ----------------------------------------
 
 //==============================================================================
-class DeepPhaserAudioProcessorEditor final 
+class DeepPhaserAudioProcessorEditor final
     : public juce::AudioProcessorEditor
-    , public juce::Timer
-{
+    , public juce::Timer {
 public:
-    explicit DeepPhaserAudioProcessorEditor (DeepPhaserAudioProcessor&);
+    explicit DeepPhaserAudioProcessorEditor(DeepPhaserAudioProcessor&);
     ~DeepPhaserAudioProcessorEditor() override;
 
     //==============================================================================
-    void paint (juce::Graphics&) override;
+    void paint(juce::Graphics&) override;
     void resized() override;
 
-    void UpdateGui() {
-        timeview_.UpdateGui();
-        spectralview_.UpdateGui();
-    }
-
-    void UpdateGuiFromTimeView() {
-        spectralview_.UpdateGui();
-    }
-
+    void UpdateGui();
     void timerCallback() override;
 private:
     DeepPhaserAudioProcessor& p_;
     pluginshared::PresetPanel preset_panel_;
 
+    // control section
     juce::Rectangle<int> basic_bound_;
     juce::Label allpass_title_{"basic", "basic"};
     ui::Dial state_{"state"};
-    ui::Dial allpass_blend_{"blend"};
-    juce::Label feedback_style_label_{"", "feedback from"};
-    ui::Switch fb_style_{"fir", "apf"};
-    ui::Dial fb_value_{"feedback"};
-    ui::Dial fb_damp_{"damp"};
     ui::Dial drywet_{"drywet"};
     ui::FlatButton panic_;
 
-    juce::Rectangle<int> fir_bound_;
-    juce::Label fir_title_{"fir", "fir"};
-    ui::Dial cutoff_{"cutoff"};
-    ui::Dial coeff_len_{"steep"};
-    ui::Dial side_lobe_{"side_lobe"};
-    ui::Switch minum_phase_{"minum_phase"};
-    ui::Switch highpass_{"highpass"};
-    ui::Switch custom_{"custom"};
+    // blend（单一中心参数，无 LFO 调制）
+    juce::Rectangle<int> blend_bound_;
+    juce::Label blend_title_{"", "blend"};
+    ui::Dial blend_{"blend"};
 
+    // barberpole
     juce::Rectangle<int> barber_bound_;
     juce::Label barber_title_{"barberpole", "barberpole"};
-    ui::Switch barber_enable_{"barberpole"};
+    ui::Switch barber_enable_{"enable"};
     ui::Dial barber_phase_{"phase"};
     ui::BpmSyncDial barber_speed_{"speed"};
     ui::Dial barber_stereo_{"stereo"};
     ui::FlatButton barber_reset_phase_;
 
-    juce::Rectangle<int> blend_lfo_bound_;
-    juce::Label blend_lfo_title_{"", "blend_lfo"};
-    ui::FlatButton blend_lfo_reset_phase_{"reset phase"};
-    ui::Dial blend_range_{"range"};
-    ui::BpmSyncDial blend_speed_{"speed"};
-    ui::Dial blend_phase_{"phase"};
+    // pzmap
+    PzmapView pzmap_;
 
-    TimeView timeview_;
-    SpectralView spectralview_;
-
-    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DeepPhaserAudioProcessorEditor)
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DeepPhaserAudioProcessorEditor)
 };

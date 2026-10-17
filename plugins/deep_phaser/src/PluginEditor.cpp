@@ -1,366 +1,222 @@
 #include "PluginEditor.h"
 #include "PluginProcessor.h"
 
-#include "qwqdsp/convert.hpp"
-#include "qwqdsp/oscillator/mcf_sine_osc.hpp"
+#include <algorithm>
+#include <cmath>
+#include <numbers>
 
-// ---------------------------------------- time prev ----------------------------------------
+// ---------------------------------------- pzmap view ----------------------------------------
 
-void TimeView::UpdateGui() {
-    std::copy_n(p_.coeffs_.begin(), p_.coeff_len_, coeff_buffer_.begin());
+PzmapView::PzmapView(DeepPhaserAudioProcessor& p)
+    : p_(p) {
+    addAndMakeVisible(title_);
+    addAndMakeVisible(response_layer_);
+    addAndMakeVisible(edit_layer_);
 
-    if (p_.coeff_len_ != 0) {
-        coeff_buffer_[p_.coeff_len_] = coeff_buffer_[p_.coeff_len_ - 1];
-    }
-    repaint();
+    edit_layer_.on_commit_ = [this](size_t idx, bool pole, global::PolarPoint z) { Commit(idx, pole, z); };
+    edit_layer_.on_reset_ = [this](size_t idx, bool pole) { ResetToDefault(idx, pole); };
+    ReloadFromProcessor();
 }
 
-void TimeView::paint(juce::Graphics& g) {
-    g.fillAll(ui::green_bg);
-
-    // 获取图表bound
-    auto b = getLocalBounds();
-    b.removeFromTop(title_.getHeight());
-    b.reduce(4, 4);
-    auto bf = b.toFloat();
-    g.setColour(ui::black_bg);
-    g.fillRect(b);
-
-    g.reduceClipRegion(b);
-    // 绘制实际使用的，如果是mouseUp后就是实际的
-    g.setColour(ui::line_fore);
-    float lasty = juce::jmap(coeff_buffer_[0], -1.0f, 1.0f, bf.getBottom(), bf.getY());
-    float lastx = bf.getX();
-    float const fcoeff_len = static_cast<float>(p_.coeff_len_);
-    for (int x = 0; x < b.getWidth(); ++x) {
-        size_t const idx = static_cast<size_t>(static_cast<float>(x) * fcoeff_len / static_cast<float>(b.getWidth()));
-        float const val = coeff_buffer_[idx];
-        float const y = juce::jmap(val, -1.0f, 1.0f, bf.getBottom(), bf.getY());
-        float const xx = static_cast<float>(x) + bf.getX();
-        g.drawLine(lastx, lasty, xx, y);
-        lastx = xx;
-        lasty = y;
+bool PzmapView::PoleSeparated(size_t idx, global::PolarPoint z) const {
+    if (global::IsPoleDisabled(z)) {
+        return true; // 非法极点会被整节禁用、不参与分解，无需间距校验
     }
-
-    if (display_custom_.getToggleState()) {
-        // 绘制自定义波形
-        g.setColour(ui::active_bg);
-        lasty = juce::jmap(p_.custom_coeffs_[0], -1.0f, 1.0f, bf.getBottom(), bf.getY());
-        lastx = bf.getX();
-        for (int x = 0; x < b.getWidth(); ++x) {
-            size_t const idx = static_cast<size_t>(static_cast<float>(x) * fcoeff_len / static_cast<float>(b.getWidth()));
-            float const val = p_.custom_coeffs_[idx];
-            float const y = juce::jmap(val, -1.0f, 1.0f, bf.getBottom(), bf.getY());
-            float const xx = static_cast<float>(x) + bf.getX();
-            g.drawLine(lastx, lasty, xx, y);
-            lastx = xx;
-            lasty = y;
+    auto const zc = global::ToComplex(z);
+    for (size_t i = 0; i < global::kMaxSections; ++i) {
+        if (i == idx) {
+            continue;
+        }
+        global::PolarPoint other;
+        {
+            juce::SpinLock::ScopedLockType lock(p_.params_.poles_zeros_lock_);
+            other = p_.params_.poles_[i];
+        }
+        if (global::IsPoleDisabled(other)) {
+            continue; // 已禁用的极点不参与分解，不参与间距校验
+        }
+        if (std::abs(zc - global::ToComplex(other)) < kMinSep) {
+            return false;
         }
     }
+    return true;
 }
 
-void TimeView::mouseDrag(const juce::MouseEvent& e) {
-    // 获取图表bound
-    auto b = getLocalBounds();
-    b.removeFromTop(title_.getHeight());
-    b.reduce(4, 4);
-
-    auto pos = e.getPosition();
-    pos.x = std::clamp(pos.x, b.getX(), b.getRight());
-    pos.y = std::clamp(pos.y, b.getY(), b.getBottom());
-
-    float const fcoeff_len = static_cast<float>(p_.coeff_len_);
-    auto bf = b.toFloat();
-    size_t idx = static_cast<size_t>((static_cast<float>(pos.getX()) - bf.getX()) * fcoeff_len / static_cast<float>(bf.getWidth()));
-    idx = std::clamp(idx, size_t{0}, p_.coeff_len_ - 1);
-
-    float val = juce::jmap(static_cast<float>(pos.y), bf.getY(), bf.getBottom(), 1.0f, -1.0f);
-    if (e.mods.isRightButtonDown()) {
-        val = 0;
+void PzmapView::Commit(size_t idx, bool pole, global::PolarPoint z) {
+    if (pole && !PoleSeparated(idx, z)) {
+        return; // 间距不足：拒绝本次提交，保持原布局
     }
-
-    coeff_buffer_[idx] = val;
-    p_.custom_coeffs_[idx] = val;
-
-    repaint();
-    if (auto* parent = getParentComponent(); parent != nullptr) {
-        static_cast<DeepPhaserAudioProcessorEditor*>(parent)->UpdateGuiFromTimeView();
+    if (pole) {
+        p_.params_.SetPole(idx, z);
     }
-}
-
-void TimeView::RepaintTimeAndSpectralView() {
-    repaint();
-    if (auto* parent = getParentComponent(); parent != nullptr) {
-        static_cast<DeepPhaserAudioProcessorEditor*>(parent)->repaint();
+    else {
+        p_.params_.SetZero(idx, z);
     }
+    ReloadFromProcessor();
 }
 
-void TimeView::mouseUp(const juce::MouseEvent& e) {
-    std::ignore = e;
-    SendCoeffs();
+void PzmapView::ResetToDefault(size_t idx, bool pole) {
+    // 默认布局：上半平面均匀分布（与 Params::InitDefaultPZ 一致）
+    float const denom = static_cast<float>(global::kMaxSections + 1);
+    global::PolarPoint const z{static_cast<float>(idx + 1) / denom, pole ? 0.8f : 1.0f};
+    Commit(idx, pole, z);
 }
 
-void TimeView::SendCoeffs() {
-    p_.is_using_custom_ = true;
-    p_.should_update_fir_ = true;
-}
-
-void TimeView::CopyCoeffesToCustom() {
+void PzmapView::ReloadFromProcessor() {
     {
-        juce::ScopedLock _{p_.getCallbackLock()};
-        std::copy_n(p_.coeffs_.begin(), p_.coeff_len_, p_.custom_coeffs_.begin());
+        juce::SpinLock::ScopedLockType lock(p_.params_.poles_zeros_lock_);
+        std::copy_n(p_.params_.poles_.begin(), global::kMaxSections, cached_poles_.begin());
+        std::copy_n(p_.params_.zeros_.begin(), global::kMaxSections, cached_zeros_.begin());
     }
-    std::copy(p_.custom_coeffs_.begin(), p_.custom_coeffs_.end(), coeff_buffer_.begin());
+    response_layer_.SetData(cached_poles_, cached_zeros_);
+    edit_layer_.SetData(cached_poles_, cached_zeros_);
     repaint();
 }
 
-void TimeView::ClearCustomCoeffs() {
-    std::fill(p_.custom_coeffs_.begin(), p_.custom_coeffs_.end(), float{});
+void PzmapView::SetNumSections(int /*n*/) {
+    // 始终展示全部可编辑零极点，与 state(= 重复级数 N) 解耦
     repaint();
 }
 
-// ---------------------------------------- spectral view ----------------------------------------
-
-void SpectralView::paint(juce::Graphics& g) {
+void PzmapView::paint(juce::Graphics& g) {
     g.fillAll(ui::green_bg);
 
-    // 获取图表bound
     auto b = getLocalBounds();
-    b.removeFromTop(title_.getHeight());
-    b.reduce(2, 8);
-    auto text_bound = b.removeFromLeft(36).toFloat();
-    auto bf = b.toFloat();
+    b.reduce(4, 4);
     g.setColour(ui::black_bg);
     g.fillRect(b);
 
-    // 绘制频谱音量数字
-    float const fcoeff_len = static_cast<float>(time_.p_.coeff_len_);
-    constexpr size_t kNumLines = 5;
-    float const centerx = text_bound.getCentreX();
-    g.setColour(ui::white_fore);
-    g.setFont(juce::Font{juce::FontOptions{}.withHeight(12)});
-    for (size_t i = 0; i < kNumLines; ++i) {
-        float const centery = text_bound.getY() + static_cast<float>(i) * static_cast<float>(text_bound.getHeight()) / (kNumLines - 1.0f);
-        juce::Rectangle<float> text{0.0, 0.0, text_bound.getWidth(), 12.0f};
-        text = text.withCentre({centerx, centery});
-        float const val = max_db_ - static_cast<float>(i) * (max_db_ - min_db_) / (kNumLines - 1.0f);
-        g.drawText(juce::String{val, 1}, text, juce::Justification::right);
-    }
+    auto plot = b;
+    plot.removeFromLeft(kInsetLeft);
+    plot.removeFromRight(kInsetRight);
+    plot.removeFromTop(kInsetTop);
+    plot.removeFromBottom(kInsetBottom);
+    auto const pf = plot.toFloat();
 
-    // 绘制超采样频谱
-    g.setColour(ui::line_fore);
-    float lasty = juce::jmap(gains_[0], bf.getBottom(), bf.getY());
-    float lastx = bf.getX();
-    for (int x = 0; x < b.getWidth(); ++x) {
-        size_t idx = static_cast<size_t>(static_cast<float>(static_cast<size_t>(x) * gains_.size()) / static_cast<float>(b.getWidth()));
-        idx = std::min(idx, gains_.size() - 1);
-        float const val = gains_[idx];
-        float const y = juce::jmap(val, bf.getBottom(), bf.getY());
-        float const xx = static_cast<float>(x) + bf.getX();
-        g.drawLine(lastx, lasty, xx, y);
-        lastx = xx;
-        lasty = y;
-    }
+    // 网格：0dB（峰值参考线）与 -30dB
+    auto const grid_y = [&](float db) {
+        float const norm = (db - PzResponseLayer::kDbFloor) / (PzResponseLayer::kDbCeil - PzResponseLayer::kDbFloor);
+        return pf.getBottom() - pf.getHeight() * std::clamp(norm, 0.0f, 1.0f);
+    };
+    g.setColour(ui::line_fore.withAlpha(0.12f));
+    g.drawLine(pf.getX(), grid_y(-30.0f), pf.getRight(), grid_y(-30.0f), 1.0f);
+    g.setColour(ui::line_fore.withAlpha(0.30f));
+    g.drawLine(pf.getX(), grid_y(0.0f), pf.getRight(), grid_y(0.0f), 1.0f);
 
-    // 绘制自定义频谱
-    if (time_.display_custom_.getToggleState()) {
-        g.setColour(ui::active_bg);
-        lasty = juce::jmap(time_.p_.custom_spectral_gains[0], bf.getBottom(), bf.getY());
-        lastx = bf.getX();
-        for (int x = 0; x < b.getWidth(); ++x) {
-            size_t const idx = static_cast<size_t>(static_cast<float>(static_cast<float>(x) * fcoeff_len) / static_cast<float>(b.getWidth()));
-            float const val = time_.p_.custom_spectral_gains[idx];
-            float const y = juce::jmap(val, bf.getBottom(), bf.getY());
-            float const xx = static_cast<float>(x) + bf.getX();
-            g.drawLine(lastx, lasty, xx, y);
-            lastx = xx;
-            lasty = y;
-        }
-    }
+    // 三组轴刻度：左 dB、右模长、底部 x（归一化角频率）
+    g.setFont(juce::Font{juce::FontOptions{10.0f}});
+    g.setColour(ui::inactive_bg);
+
+    auto const ticks_left = [&](float db) {
+        float const y = grid_y(db);
+        g.drawLine(static_cast<float>(plot.getX()) - 4.0f, y, static_cast<float>(plot.getX()), y, 1.0f);
+        juce::String const label = juce::String::formatted("%d", static_cast<int>(db));
+        g.drawFittedText(label, {b.getX() + 2, static_cast<int>(y) - 6, plot.getX() - b.getX() - 8, 12},
+                         juce::Justification::centredRight, 1);
+    };
+    ticks_left(PzResponseLayer::kDbFloor);
+    ticks_left(-30.0f);
+    ticks_left(0.0f);
+
+    auto const ticks_right = [&](float r) {
+        float const y = pf.getBottom() - pf.getHeight() * (r / PzEditLayer::kRMax);
+        g.drawLine(static_cast<float>(plot.getRight()), y, static_cast<float>(plot.getRight()) + 4.0f, y, 1.0f);
+        juce::String const label = juce::String::formatted("%g", r);
+        g.drawFittedText(label, {plot.getRight() + 6, static_cast<int>(y) - 6, b.getRight() - plot.getRight() - 10, 12},
+                         juce::Justification::centredLeft, 1);
+    };
+    // 模长刻度：0 / 0.5 / 1（kRMax = 1，故 1.0 即顶端，不再重复标一次）
+    ticks_right(0.0f);
+    ticks_right(0.5f);
+    ticks_right(PzEditLayer::kRMax);
+
+    auto const ticks_bottom = [&](float x) {
+        float const px =
+            pf.getX() + pf.getWidth() * (x - PzEditLayer::kXMin) / (PzEditLayer::kXMax - PzEditLayer::kXMin);
+        g.drawLine(px, pf.getBottom(), px, pf.getBottom() + 4.0f, 1.0f);
+        juce::String const label = juce::String::formatted("%.2g", x);
+        g.drawFittedText(label, {static_cast<int>(px) - 20, plot.getBottom() + 2, 40, 12}, juce::Justification::centred,
+                         1);
+    };
+    ticks_bottom(PzEditLayer::kXMin);
+    ticks_bottom(0.25f);
+    ticks_bottom(0.5f);
+    ticks_bottom(0.75f);
+    ticks_bottom(PzEditLayer::kXMax);
+
+    // x 轴名称（左下角）
+    g.setColour(ui::inactive_bg);
+    g.drawFittedText("rad", {b.getX() + 2, plot.getBottom() + 2, 30, 12}, juce::Justification::centredLeft, 1);
 }
 
-void SpectralView::UpdateGui() {
-    std::array<float, kGainFFTSize> fft_buffer{};
-    std::copy_n(time_.coeff_buffer_.begin(), time_.p_.coeff_len_, fft_buffer.begin());
-    fft_.FFTGainPhase(fft_buffer, gains_);
-
-    for (auto& x : gains_) {
-        x = qwqdsp::convert::Gain2Db<-100.0f>(x);
-    }
-
-    auto[pmin, pmax] = std::minmax_element(gains_.begin(), gains_.end());
-    float const min = *pmin;
-    float const max = *pmax;
-    float const scale = 1.0f / (max - min + 1e-6f);
-    for (auto& x : gains_) {
-        x = (x - min) * scale;
-    }
-    max_db_ = max;
-    min_db_ = min;
-
-    repaint();
-}
-
-void SpectralView::mouseDrag(const juce::MouseEvent& e) {
-    // 获取图表bound
+void PzmapView::resized() {
     auto b = getLocalBounds();
-    b.removeFromTop(title_.getHeight());
-    b.reduce(2, 8);
-    b.removeFromLeft(36).toFloat();
-    auto bf = b.toFloat();
+    auto const title_b = b.removeFromTop(static_cast<int>(title_.getFont().getHeight() * 1.2f));
+    title_.setBounds(title_b);
+    b.reduce(4, 4);
 
-    auto pos = e.getPosition();
-    pos.x = std::clamp(pos.x, b.getX(), b.getRight());
-    pos.y = std::clamp(pos.y, b.getY(), b.getBottom());
-
-    size_t const coeff_len = time_.p_.coeff_len_;
-    float const fcoeff_len = static_cast<float>(coeff_len);
-    size_t idx = static_cast<size_t>((static_cast<float>(pos.getX()) - bf.getX()) * fcoeff_len / bf.getWidth());
-    idx = std::clamp(idx, size_t{0}, coeff_len - 1);
-
-    float val = juce::jmap(static_cast<float>(pos.y), bf.getY(), bf.getBottom(), 1.0f, 0.0f);
-    if (e.mods.isRightButtonDown()) {
-        val = 0;
-    }
-
-    time_.p_.custom_spectral_gains[idx] = val;
-
-    // 加法合成
-    std::array<qwqdsp_oscillator::MCFSineOsc, kMaxCoeffLen> oscs;
-    std::array<float, kMaxCoeffLen> true_gains;
-    for (size_t i = 0; i < coeff_len; ++i) {
-        oscs[i].Reset(static_cast<float>(i) * std::numbers::pi_v<float> / fcoeff_len, 0.0f);
-        float const db = std::lerp(-101.0f, 0.0f, time_.p_.custom_spectral_gains[i]);
-        if (db < -100.0f) {
-            true_gains[i] = 0;
-        }
-        else {
-            true_gains[i] = qwqdsp::convert::Db2Gain(db);
-        }
-    }
-
-    for (size_t tidx = 0; tidx < coeff_len; ++tidx) {
-        float sum{};
-        for (size_t fidx = 0; fidx < coeff_len; ++fidx) {
-            sum += true_gains[fidx] * oscs[fidx].Tick();
-        }
-        time_.coeff_buffer_[tidx] = sum;
-        time_.p_.custom_coeffs_[tidx] = sum;
-    }
-
-    UpdateGui();
-    time_.repaint();
-}
-
-void SpectralView::mouseUp(const juce::MouseEvent& e) {
-    std::ignore = e;
-    time_.SendCoeffs();
+    // 两层共用同一 plotting bound（共享 bound 要求）
+    auto plot = b;
+    plot.removeFromLeft(kInsetLeft);
+    plot.removeFromRight(kInsetRight);
+    plot.removeFromTop(kInsetTop);
+    plot.removeFromBottom(kInsetBottom);
+    response_layer_.setBounds(plot);
+    edit_layer_.setBounds(plot);
 }
 
 // ---------------------------------------- editor ----------------------------------------
 
-DeepPhaserAudioProcessorEditor::DeepPhaserAudioProcessorEditor (DeepPhaserAudioProcessor& p)
-    : AudioProcessorEditor (&p)
+DeepPhaserAudioProcessorEditor::DeepPhaserAudioProcessorEditor(DeepPhaserAudioProcessor& p)
+    : AudioProcessorEditor(&p)
     , p_(p)
     , preset_panel_(*p.preset_manager_)
-    , timeview_(p)
-    , spectralview_(timeview_)
-{
-    auto& apvts = *p.value_tree_;
-
+    , pzmap_(p) {
     addAndMakeVisible(preset_panel_);
 
     addAndMakeVisible(allpass_title_);
-    allpass_blend_.BindParam(p.param_allpass_blend_);
-    addAndMakeVisible(allpass_blend_);
-    state_.BindParam(p.param_state_);
-    addAndMakeVisible(state_);
-    drywet_.BindParam(p.param_drywet_);
-    addAndMakeVisible(drywet_);
-    fb_style_.BindParam(p.param_feedback_style_);
-    addAndMakeVisible(fb_style_);
-    feedback_style_label_.setJustificationType(juce::Justification::right);
-    addAndMakeVisible(feedback_style_label_);
-
-    cutoff_.BindParam(apvts, "cutoff");
-    addAndMakeVisible(cutoff_);
-    coeff_len_.BindParam(apvts, "coeff_len");
-    addAndMakeVisible(coeff_len_);
-    side_lobe_.BindParam(apvts, "side_lobe");
-    addAndMakeVisible(side_lobe_);
-    minum_phase_.BindParam(apvts, "minum_phase");
-    addAndMakeVisible(minum_phase_);
-    addAndMakeVisible(fir_title_);
-    highpass_.BindParam(apvts, "highpass");
-    addAndMakeVisible(highpass_);
-    custom_.onStateChange = [this] {
-        if (custom_.getToggleState()) {
-            setSize(600, 264 + 200 + 30);
-            timeview_.setVisible(true);
-            spectralview_.setVisible(true);
-        }
-        else {
-            setSize(600, 264 + 30);
-            timeview_.setVisible(false);
-            spectralview_.setVisible(false);
-        }
-    };
-    addAndMakeVisible(custom_);
-
-    fb_value_.BindParam(apvts, "fb_value");
-    addAndMakeVisible(fb_value_);
-    panic_.setButtonText("panic");
-    panic_.onClick = [&p] {
-        p.Panic();
-    };
     addAndMakeVisible(panic_);
-    fb_damp_.BindParam(apvts, "fb_damp");
-    addAndMakeVisible(fb_damp_);
+    panic_.setButtonText("panic");
+    panic_.onClick = [&p] { p.reset(); };
+
+    state_.BindParam(p.params_.state.ptr_);
+    addAndMakeVisible(state_);
+    drywet_.BindParam(p.params_.drywet.ptr_);
+    addAndMakeVisible(drywet_);
+
+    addAndMakeVisible(blend_title_);
+    blend_.BindParam(p.params_.blend.ptr_);
+    addAndMakeVisible(blend_);
 
     addAndMakeVisible(barber_title_);
-    barber_phase_.BindParam(apvts, "barber_phase");
-    addAndMakeVisible(barber_phase_);
-    barber_speed_.BindParam(p.barber_lfo_state_);
-    addAndMakeVisible(barber_speed_);
-    barber_enable_.BindParam(apvts, "barber_enable");
+    barber_enable_.BindParam(p.params_.barber_enable.ptr_);
     addAndMakeVisible(barber_enable_);
+    barber_phase_.BindParam(p.params_.barber_phase.ptr_);
+    addAndMakeVisible(barber_phase_);
+    barber_speed_.BindParam(p.params_.barber_lfo);
+    addAndMakeVisible(barber_speed_);
+    barber_stereo_.BindParam(p.params_.barber_stereo.ptr_);
+    addAndMakeVisible(barber_stereo_);
     barber_reset_phase_.setButtonText("reset phase");
     barber_reset_phase_.onClick = [this] {
         juce::ScopedLock _{p_.getCallbackLock()};
-        p_.barber_oscillator_.Reset();
+        p_.params_.barber_lfo.TryResetPhase(0.0f);
     };
     addAndMakeVisible(barber_reset_phase_);
-    barber_stereo_.BindParam(p.param_barber_stereo_);
-    addAndMakeVisible(barber_stereo_);
 
-    addAndMakeVisible(blend_lfo_title_);
-    addAndMakeVisible(blend_lfo_reset_phase_);
-    blend_lfo_reset_phase_.onClick = [this] {
-        juce::ScopedLock _{p_.getCallbackLock()};
-        p_.blend_lfo_phase_ = 0;
-    };
-    blend_phase_.BindParam(p.param_blend_phase_);
-    addAndMakeVisible(blend_phase_);
-    blend_range_.BindParam(p.param_blend_range_);
-    addAndMakeVisible(blend_range_);
-    blend_speed_.BindParam(p.blend_lfo_state_);
-    addAndMakeVisible(blend_speed_);
+    pzmap_.SetNumSections(static_cast<int>(global::kMaxSections));
+    addAndMakeVisible(pzmap_);
 
-    addAndMakeVisible(timeview_);
-    addAndMakeVisible(spectralview_);
-
-    setSize(600, 264 + 30);
-
-    custom_.setToggleState(p.is_using_custom_, juce::sendNotificationSync);
+    // 控制行(110px) + pzmap 约 400px 见方，避免 pzmap 被挤成一条裂缝
+    setSize(780, 540);
 
     startTimerHz(30);
 }
 
-DeepPhaserAudioProcessorEditor::~DeepPhaserAudioProcessorEditor() {
-}
+DeepPhaserAudioProcessorEditor::~DeepPhaserAudioProcessorEditor() {}
 
 //==============================================================================
-void DeepPhaserAudioProcessorEditor::paint (juce::Graphics& g) {
+void DeepPhaserAudioProcessorEditor::paint(juce::Graphics& g) {
     g.fillAll(ui::black_bg);
 
     g.setColour(ui::green_bg);
@@ -368,87 +224,67 @@ void DeepPhaserAudioProcessorEditor::paint (juce::Graphics& g) {
     g.fillRect(b.removeFromTop(30));
     b.removeFromTop(2);
     g.fillRect(basic_bound_);
-    g.fillRect(fir_bound_);
+    g.fillRect(blend_bound_);
     g.fillRect(barber_bound_);
-    g.fillRect(blend_lfo_bound_);
 }
 
 void DeepPhaserAudioProcessorEditor::resized() {
     auto b = getLocalBounds();
     preset_panel_.setBounds(b.removeFromTop(30));
     b.removeFromTop(2);
+
+    // 单一控制行：basic + blend + barberpole，均布全宽
     {
-        auto topblock = b.removeFromTop(125);
+        auto topblock = b.removeFromTop(110);
+        // --- basic 区 ---
+        auto basic_block = topblock.removeFromLeft(190);
+        basic_bound_ = basic_block;
         {
-            auto basic_bound = topblock.removeFromLeft(80 * 4);
-            basic_bound_ = basic_bound;
-            auto basic_bound_top = basic_bound.removeFromTop(25);
-            panic_.setBounds(basic_bound_top.removeFromRight(80).reduced(2));
-            fb_style_.setBounds(basic_bound_top.removeFromRight(50).reduced(2));
-            feedback_style_label_.setBounds(basic_bound_top.removeFromRight(100));
-            allpass_title_.setBounds(basic_bound_top);
-            state_.setBounds(basic_bound.removeFromLeft(64));;
-            allpass_blend_.setBounds(basic_bound.removeFromLeft(64));
-            fb_value_.setBounds(basic_bound.removeFromLeft(64));
-            fb_damp_.setBounds(basic_bound.removeFromLeft(64));
-            drywet_.setBounds(basic_bound.removeFromLeft(64));
+            auto blk = basic_block;
+            auto blk_title = blk.removeFromTop(25);
+            allpass_title_.setBounds(blk_title);
+            state_.setBounds(blk.removeFromLeft(70));
+            drywet_.setBounds(blk.removeFromLeft(60));
+            panic_.setBounds(blk);
         }
         topblock.removeFromLeft(8);
+
+        // --- blend 区（单一参数） ---
+        blend_bound_ = topblock.removeFromLeft(190);
         {
-            auto fir_block = topblock.removeFromLeft(80 * 4);
-            fir_bound_ = fir_block;
-            {
-                auto fir_title = fir_block.removeFromTop(25);
-                minum_phase_.setBounds(fir_title.removeFromRight(100).reduced(2, 0));
-                highpass_.setBounds(fir_title.removeFromRight(70).reduced(2, 0));
-                custom_.setBounds(fir_title.removeFromRight(60).reduced(2, 0));
-                fir_title_.setBounds(fir_title);
-            }
-            cutoff_.setBounds(fir_block.removeFromLeft(80));;
-            coeff_len_.setBounds(fir_block.removeFromLeft(80));;
-            side_lobe_.setBounds(fir_block.removeFromLeft(80));;
+            auto blk = blend_bound_;
+            auto blk_title = blk.removeFromTop(25);
+            blend_title_.setBounds(blk_title);
+            blend_.setBounds(blk.removeFromLeft(70));
+        }
+        topblock.removeFromLeft(8);
+
+        // --- barberpole 区 ---
+        barber_bound_ = topblock;
+        {
+            auto blk = barber_bound_;
+            auto blk_title = blk.removeFromTop(25);
+            barber_reset_phase_.setBounds(blk_title.removeFromRight(90).reduced(2));
+            barber_enable_.setBounds(blk_title.removeFromRight(70).reduced(2));
+            barber_title_.setBounds(blk_title);
+            barber_phase_.setBounds(blk.removeFromLeft(70));
+            barber_speed_.setBounds(blk.removeFromLeft(70));
+            barber_stereo_.setBounds(blk.removeFromLeft(70));
         }
     }
     b.removeFromTop(8);
-    {
-        auto bottom_block = b.removeFromTop(125);
-        {
-            barber_bound_ = bottom_block.removeFromLeft(260);
-            auto barber_block = barber_bound_;
-            auto barber_title_bound = barber_block.removeFromTop(25);
-            barber_reset_phase_.setBounds(barber_title_bound.removeFromRight(100).reduced(2));
-            barber_enable_.setBounds(barber_title_bound.removeFromRight(80).reduced(2));
-            barber_title_.setBounds(barber_title_bound);
-            barber_phase_.setBounds(barber_block.removeFromLeft(80));
-            barber_speed_.setBounds(barber_block.removeFromLeft(80));
-            barber_stereo_.setBounds(barber_block);
-        }
-        bottom_block.removeFromLeft(8);
-        {
-            blend_lfo_bound_ = bottom_block.removeFromLeft(240);
-            auto blend_lfo_block = blend_lfo_bound_;
-            auto blend_lfo_top_block = blend_lfo_block.removeFromTop(25);
-            blend_lfo_reset_phase_.setBounds(blend_lfo_top_block.removeFromRight(100).reduced(2));
-            blend_lfo_title_.setBounds(blend_lfo_top_block);
-            blend_speed_.setBounds(blend_lfo_block.removeFromLeft(80));
-            blend_range_.setBounds(blend_lfo_block.removeFromLeft(80));
-            blend_phase_.setBounds(blend_lfo_block.removeFromLeft(80));
-        }
-    }
-    b.removeFromTop(8);
-    if (custom_.getToggleState()) {
-        auto graphic_block = b.removeFromTop(200);
-        auto time_block = graphic_block.removeFromLeft(graphic_block.getWidth() / 2);
-        time_block.removeFromRight(4);
-        timeview_.setBounds(time_block);
-        auto spectral_block = graphic_block;
-        spectral_block.removeFromRight(4);
-        spectralview_.setBounds(spectral_block);
-    }
+
+    // 剩余区域：pzmap
+    pzmap_.setBounds(b);
+}
+
+void DeepPhaserAudioProcessorEditor::UpdateGui() {
+    pzmap_.ReloadFromProcessor();
+    pzmap_.SetNumSections(static_cast<int>(global::kMaxSections));
 }
 
 void DeepPhaserAudioProcessorEditor::timerCallback() {
-    if (p_.have_new_coeff_.exchange(false)) {
+    if (p_.engine_.ExchangeNewCoeff()) {
         UpdateGui();
     }
 }

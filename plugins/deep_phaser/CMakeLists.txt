@@ -1,5 +1,5 @@
 set(PLUGIN_NAME DeepPhaser)
-set(PLUGIN_VERSION 0.2.0)
+set(PLUGIN_VERSION 2.0.0)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_XCODE_GENERATE_SCHEME OFF)
@@ -49,6 +49,8 @@ target_sources(${PLUGIN_NAME}
     PRIVATE
     src/PluginEditor.cpp
     src/PluginProcessor.cpp
+    src/ui/pz_edit_layer.cpp
+    src/ui/pz_response_layer.cpp
 )
 
 target_include_directories(${PLUGIN_NAME}
