@@ -13,25 +13,30 @@
 namespace green_vocoder::dsp {
 
 static float GetFixGain(int fft_size) noexcept {
-    float db = 0;
-    switch (fft_size) {
-        case 256:
-        case 512:
-            db = 5;
-            break;
-        case 1024:
-            db = 10;
-            break;
-        case 2048:
-            db = 13;
-            break;
-        case 4096:
-            db = 16;
-            break;
-        default:
-            assert(false);
+    // 倒谱 lifter 能量补偿（经验值），在 log2 尺寸域线性插值；
+    // 超出表格后按 3 dB/oct 外推，以支持随采样率缩放的 FFT 尺寸
+    struct Point {
+        float log2_size;
+        float db;
+    };
+    static constexpr Point kPoints[] = {
+        {8.0f, 5.0f},   // 256
+        {9.0f, 5.0f},   // 512
+        {10.0f, 10.0f}, // 1024
+        {11.0f, 13.0f}, // 2048
+        {12.0f, 16.0f}, // 4096
+    };
+    float const x = std::log2(static_cast<float>(fft_size));
+    if (x <= kPoints[0].log2_size)
+        return qwqdsp::convert::Db2Gain(kPoints[0].db);
+    for (size_t i = 1; i < std::size(kPoints); ++i) {
+        if (x <= kPoints[i].log2_size) {
+            float const t = (x - kPoints[i - 1].log2_size) / (kPoints[i].log2_size - kPoints[i - 1].log2_size);
+            return qwqdsp::convert::Db2Gain(kPoints[i - 1].db + t * (kPoints[i].db - kPoints[i - 1].db));
+        }
     }
-    return qwqdsp::convert::Db2Gain(db);
+    float const last = kPoints[std::size(kPoints) - 1].log2_size;
+    return qwqdsp::convert::Db2Gain(kPoints[std::size(kPoints) - 1].db + 3.0f * (x - last));
 }
 
 void STFTCepstrum::Init(STFT& self) {

@@ -57,11 +57,8 @@ target_sources(${PLUGIN_NAME}
     src/dsp/stft/stft.cpp
     src/dsp/stft/stft_cepstrum.cpp
     src/dsp/stft/stft_mfcc.cpp
-    src/dsp/stft/stft_morph.cpp
     src/dsp/stft/stft_smooth.cpp
     src/dsp/stft/stft_standard.cpp
-    src/dsp/stft/stft_welch.cpp
-    src/dsp/stft/stft_wiener.cpp
     src/ui/burg_lpc.cpp
     src/ui/channel_vocoder.cpp
     src/ui/pre_fx.cpp

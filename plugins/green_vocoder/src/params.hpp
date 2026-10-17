@@ -252,7 +252,7 @@ public:
          0.2f
     };
     pluginshared::ChoiceParam stft_size{
-        "stft_size", juce::StringArray{"256", "512", "1024", "2048", "4096"},
+        "stft_size", juce::StringArray{"512", "1024", "2048", "4096"},
          "1024"
     };
     pluginshared::FloatParam stft_detail{
@@ -260,8 +260,8 @@ public:
          0.3f
     };
     pluginshared::ChoiceParam stft_type{
-        "stft_type", juce::StringArray{"Standard", "Cepstrum", "MFCC", "Smooth", "Welch", "Morph", "Wiener"},
-         "Cepstrum"
+        "stft_type", juce::StringArray{"sinc smear", "cepstrum", "mel avg", "smooth"},
+         "cepstrum"
     };
     pluginshared::BoolParam stft_smooth_erb{
         "stft_smooth_erb", true // true = ERB，false = OCT
@@ -269,27 +269,6 @@ public:
     pluginshared::FloatParam stft_smooth{
         "stft_smooth", {0.1f, 2.0f, 0.05f},
          1.0f
-    };
-    pluginshared::FloatParam stft_welch{
-        "stft_welch", {1.0f, 16.0f, 1.0f},
-         4.0f
-    };
-    pluginshared::FloatParam stft_floor{
-        "stft_floor", {-120.0f, -20.0f, 1.0f},
-         -80.0f
-    };
-    pluginshared::FloatParam stft_morph{
-        "stft_morph", {0.0f, 1.0f, 0.01f},
-         0.5f
-    };
-    pluginshared::BoolParam stft_morph_ab{
-        "stft_morph_ab", true // true = A→B，false = B→A
-    };
-    pluginshared::BoolParam stft_wiener_glitch{
-        "stft_wiener_glitch", false // true = g 作用在 fft(carry)（未加窗载波）→ 碎裂/glitch 音色
-    };
-    pluginshared::BoolParam stft_wiener_ab{
-        "stft_wiener_ab", true // true = a=A(调制器), b=B(载波)；false 交换
     };
 
     // pitch tracking
@@ -364,12 +343,6 @@ public:
         layout += stft_type;
         layout += stft_smooth_erb;
         layout += stft_smooth;
-        layout += stft_welch;
-        layout += stft_floor;
-        layout += stft_morph;
-        layout += stft_morph_ab;
-        layout += stft_wiener_glitch;
-        layout += stft_wiener_ab;
         layout += track_low;
         layout += track_high;
         layout += track_pitch;
@@ -409,12 +382,6 @@ public:
         stft_type.ptr_->addListener(&stft_listener_);
         stft_smooth_erb.ptr_->addListener(&stft_listener_);
         stft_smooth.ptr_->addListener(&stft_listener_);
-        stft_welch.ptr_->addListener(&stft_listener_);
-        stft_floor.ptr_->addListener(&stft_listener_);
-        stft_morph.ptr_->addListener(&stft_listener_);
-        stft_morph_ab.ptr_->addListener(&stft_listener_);
-        stft_wiener_glitch.ptr_->addListener(&stft_listener_);
-        stft_wiener_ab.ptr_->addListener(&stft_listener_);
         stft_size.ptr_->addListener(&stft_listener_);
         track_low.ptr_->addListener(&pitch_osc_listener_);
         track_high.ptr_->addListener(&pitch_osc_listener_);
@@ -455,12 +422,6 @@ public:
         stft_type.ptr_->removeListener(&stft_listener_);
         stft_smooth_erb.ptr_->removeListener(&stft_listener_);
         stft_smooth.ptr_->removeListener(&stft_listener_);
-        stft_welch.ptr_->removeListener(&stft_listener_);
-        stft_floor.ptr_->removeListener(&stft_listener_);
-        stft_morph.ptr_->removeListener(&stft_listener_);
-        stft_morph_ab.ptr_->removeListener(&stft_listener_);
-        stft_wiener_glitch.ptr_->removeListener(&stft_listener_);
-        stft_wiener_ab.ptr_->removeListener(&stft_listener_);
         stft_size.ptr_->removeListener(&stft_listener_);
         track_low.ptr_->removeListener(&pitch_osc_listener_);
         track_high.ptr_->removeListener(&pitch_osc_listener_);

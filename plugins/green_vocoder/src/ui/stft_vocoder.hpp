@@ -23,13 +23,7 @@ private:
     ::ui::Dial detail_{"detail"};
     ::ui::Switch smooth_type_{"ERB", "OCT"};
     ::ui::Dial smooth_{"smooth"};
-    ::ui::Dial welch_{"avg"};
-    ::ui::Dial floor_{"floor"};
-    ::ui::Dial morph_{"morph"};
     ::ui::Dial mfcc_size_{"bands"};
-    ::ui::Switch direction_{"A→B", "B→A"};
-    ::ui::Switch wiener_glitch_{"glitch"};
-    ::ui::Switch wiener_ab_{"A→B", "B→A"};
 };
 
 } // namespace green_vocoder::ui

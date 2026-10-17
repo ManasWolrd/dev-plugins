@@ -32,24 +32,6 @@ STFTVocoder::STFTVocoder(AudioPluginAudioProcessor& processor)
     smooth_.BindParam(processor.params_.stft_smooth.ptr_);
     addAndMakeVisible(smooth_);
 
-    welch_.BindParam(processor.params_.stft_welch.ptr_);
-    addAndMakeVisible(welch_);
-
-    floor_.BindParam(processor.params_.stft_floor.ptr_);
-    addAndMakeVisible(floor_);
-
-    morph_.BindParam(processor.params_.stft_morph.ptr_);
-    addAndMakeVisible(morph_);
-
-    direction_.BindParam(processor.params_.stft_morph_ab.ptr_);
-    addAndMakeVisible(direction_);
-
-    wiener_glitch_.BindParam(processor.params_.stft_wiener_glitch.ptr_);
-    addAndMakeVisible(wiener_glitch_);
-
-    wiener_ab_.BindParam(processor.params_.stft_wiener_ab.ptr_);
-    addAndMakeVisible(wiener_ab_);
-
     mfcc_size_.BindParam(processor.params_.mfcc_nbands.ptr_);
     addAndMakeVisible(mfcc_size_);
 
@@ -81,41 +63,24 @@ void STFTVocoder::resized() {
     auto place_dial = [&place](juce::Component& c) { place(c, 50, 65); };
     auto place_switch = [&place](juce::Component& c) { place(c, 70, 30); };
 
-    if (mode == Wiener) {
-        // Wiener 无 attack/release/blend
-        place_switch(wiener_glitch_);
-        place_switch(wiener_ab_);
+    place_dial(attack_);
+    place_dial(release_);
+    if (mode == SincSmear) {
+        place_dial(bandwidth_);
+        place_dial(blend_);
     }
-    else if (mode == Morph) {
-        // Morph 无 attack/release
-        place_dial(morph_);
-        place_switch(direction_);
+    else if (mode == Cepstrum) {
+        place_dial(detail_);
+        place_dial(blend_);
     }
-    else {
-        place_dial(attack_);
-        place_dial(release_);
-        if (mode == Standard) {
-            place_dial(bandwidth_);
-            place_dial(blend_);
-        }
-        else if (mode == Cepstrum) {
-            place_dial(detail_);
-            place_dial(blend_);
-        }
-        else if (mode == MFCC) {
-            place_dial(mfcc_size_);
-            place_dial(blend_);
-        }
-        else if (mode == Smooth) {
-            place_switch(smooth_type_);
-            place_dial(smooth_);
-            place_dial(blend_);
-        }
-        else if (mode == Welch) {
-            place_dial(welch_);
-            place_dial(floor_);
-            place_dial(blend_);
-        }
+    else if (mode == MelAvg) {
+        place_dial(mfcc_size_);
+        place_dial(blend_);
+    }
+    else if (mode == Smooth) {
+        place_switch(smooth_type_);
+        place_dial(smooth_);
+        place_dial(blend_);
     }
 }
 
@@ -124,20 +89,11 @@ void STFTVocoder::resized() {
 void STFTVocoder::OnModeChanged() {
     using enum green_vocoder::dsp::STFTMode;
     auto mode = static_cast<green_vocoder::dsp::STFTMode>(mode_.getSelectedItemIndex());
-    attack_.setVisible(mode != Morph && mode != Wiener);
-    release_.setVisible(mode != Morph && mode != Wiener);
-    blend_.setVisible(mode != Morph && mode != Wiener);
-    bandwidth_.setVisible(mode == Standard);
-    welch_.setVisible(mode == Welch);
-    floor_.setVisible(mode == Welch);
-    morph_.setVisible(mode == Morph);
-    direction_.setVisible(mode == Morph);
-    wiener_glitch_.setVisible(mode == Wiener);
-    wiener_ab_.setVisible(mode == Wiener);
+    bandwidth_.setVisible(mode == SincSmear);
     detail_.setVisible(mode == Cepstrum);
     smooth_type_.setVisible(mode == Smooth);
     smooth_.setVisible(mode == Smooth);
-    mfcc_size_.setVisible(mode == MFCC);
+    mfcc_size_.setVisible(mode == MelAvg);
     if (!getBounds().isEmpty()) {
         resized();
     }

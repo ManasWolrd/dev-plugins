@@ -52,9 +52,6 @@ void Engine::Init(double sample_rate, int block_size) {
     cepstrum_stft_.Init(stft_);
     mfcc_stft_.Init(stft_);
     smooth_stft_.Init(stft_);
-    welch_stft_.Init(stft_);
-    morph_stft_.Init(stft_);
-    wiener_stft_.Init(stft_);
     stft_mode_ = dsp::STFTMode::Cepstrum;
 
     pitch_osc_.Init(fs);
@@ -132,8 +129,9 @@ void Engine::Update(Params& p) {
 
         case eVocoderType_BlockBurgLPC:
             if (p.should_update_block_lpc_.exchange(false, std::memory_order_acq_rel)) {
-                int const block_size =
-                    BlockSizeFromMs(global::kBlockBurgTimesMs[static_cast<size_t>(p.lpc_block_ms.Get())], sample_rate_);
+                int const block_idx =
+                    std::clamp(p.lpc_block_ms.Get(), 0, static_cast<int>(global::kBlockBurgTimesMs.size()) - 1);
+                int const block_size = BlockSizeFromMs(global::kBlockBurgTimesMs[static_cast<size_t>(block_idx)], sample_rate_);
                 block_burg_.SetParam({
                     .block_size = block_size,
                     .poles = static_cast<int>(p.lpc_order.Get()),
@@ -145,7 +143,10 @@ void Engine::Update(Params& p) {
 
         case eVocoderType_STFTVocoder:
             if (p.should_update_stft_.exchange(false, std::memory_order_acq_rel)) {
-                int const fft_size = global::kStftSizes[static_cast<size_t>(p.stft_size.Get())];
+                // 旧 preset 可能含已移除的尺寸/模式索引，先夹紧
+                int const size_idx = std::clamp(p.stft_size.Get(), 0, static_cast<int>(global::kStftSizes.size()) - 1);
+                int const fft_size =
+                    global::kStftSizes[static_cast<size_t>(size_idx)] * global::StftSizeMultiplier(sample_rate_);
                 stft_.SetParam({
                     .attack = p.stft_attack.Get(),
                     .release = p.stft_release.Get(),
@@ -157,22 +158,14 @@ void Engine::Update(Params& p) {
 
                 cepstrum_stft_.SetParam({.detail = p.stft_detail.Get()}, stft_);
                 mfcc_stft_.SetParam({.num_mfcc = static_cast<int>(p.mfcc_nbands.Get())}, stft_);
-                welch_stft_.SetParam(
-                    {.welch_frames = static_cast<int>(std::round(p.stft_welch.Get())),
-                     .floor_db = p.stft_floor.Get()},
-                    stft_);
                 smooth_stft_.SetParam(
                     {.type = p.stft_smooth_erb.Get() ? dsp::STFTSmooth::SmoothType::ERB
                                                      : dsp::STFTSmooth::SmoothType::OCT,
                      .amount = p.stft_smooth.Get()},
                     stft_);
-                morph_stft_.SetParam(
-                    {.morph = p.stft_morph.Get(), .direction_ab = p.stft_morph_ab.Get()}, stft_);
-                wiener_stft_.SetParam(
-                    {.glitch = p.stft_wiener_glitch.Get(), .direction_ab = p.stft_wiener_ab.Get()},
-                    stft_);
 
-                stft_mode_ = static_cast<dsp::STFTMode>(p.stft_type.Get());
+                int const mode_idx = std::clamp(p.stft_type.Get(), 0, 3);
+                stft_mode_ = static_cast<dsp::STFTMode>(mode_idx);
 
                 InitStftOla(fft_size);
                 UpdateStftWolaGain(); // stft_.SetParam 刚重建分析窗，确保增益随新尺寸刷新（InitStftOla 可能 early-return）
@@ -270,7 +263,7 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
                     break;
                 case eVocoderType_STFTVocoder:
                     switch (stft_mode_) {
-                        case dsp::STFTMode::Standard:
+                        case dsp::STFTMode::SincSmear:
                             stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
@@ -284,7 +277,7 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
                                     return stft_.Process(mf, sf, stft_.hann_window_, cepstrum_stft_);
                                 });
                             break;
-                        case dsp::STFTMode::MFCC:
+                        case dsp::STFTMode::MelAvg:
                             stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
@@ -296,27 +289,6 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, smooth_stft_);
-                                });
-                            break;
-                        case dsp::STFTMode::Welch:
-                            stft_ola_.Process(
-                                main, side, n, stft_wola_gain_,
-                                [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
-                                    return stft_.Process(mf, sf, stft_.hann_window_, welch_stft_);
-                                });
-                            break;
-                        case dsp::STFTMode::Morph:
-                            stft_ola_.Process(
-                                main, side, n, stft_wola_gain_,
-                                [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
-                                    return stft_.Process(mf, sf, stft_.hann_window_, morph_stft_);
-                                });
-                            break;
-                        case dsp::STFTMode::Wiener:
-                            stft_ola_.Process(
-                                main, side, n, stft_wola_gain_,
-                                [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
-                                    return stft_.Process2(mf, sf, wiener_stft_);
                                 });
                             break;
                     }

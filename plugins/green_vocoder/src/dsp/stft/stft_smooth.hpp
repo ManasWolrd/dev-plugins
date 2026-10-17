@@ -11,7 +11,7 @@ namespace green_vocoder::dsp {
 // STFTSmooth：OCT/ERB 平滑包络 STFT 声码器算法
 // ------------------------------------------------------------
 // 基于 STFT 引擎，hann 分析窗；对调制器功率谱做 OCT（倍频程）或
-// ERB 平滑得到频谱包络，再按包络逐频点计算增益（同 Standard：Blend
+// ERB 平滑得到频谱包络，再按包络逐频点计算增益（同 sinc smear：Blend
 // + 攻击/释放平滑 + 共振峰搬移）。平滑器来自
 // zldsp::analyzer::SpectrumSmoother（AGPL-3.0，见 spectrum_smoother.hpp）。
 struct STFTSmooth {

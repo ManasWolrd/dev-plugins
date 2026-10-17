@@ -12,17 +12,12 @@ namespace green_vocoder::dsp {
 
 using PackFloat2 = qwqdsp_simd_element::PackFloat<2>;
 
-struct STFTWiener; // 前向声明：Process2 专用（完整定义见 stft_wiener.hpp）
-
 // STFT 声码器模式（与 stft_type 参数索引对应）
 enum class STFTMode {
-    Standard,
+    SincSmear,
     Cepstrum,
-    MFCC,
+    MelAvg,
     Smooth,
-    Welch,
-    Morph,
-    Wiener,
 };
 
 // 参数变化检测：精确浮点相等比较（有意为之，局部抑制 -Wfloat-equal）
@@ -47,9 +42,9 @@ inline bool ParamChanged(float a, float b) noexcept {
 // STFT：基础短时傅里叶变换帧处理引擎
 // ------------------------------------------------------------
 // 提供单帧 STFT 处理链路：分析加窗 → FFT → 频谱处理（算法 functor）
-// → IFFT → 打包。帧驱动（分帧/hop/重叠相加）由外部共享 BlockOLA 承担。
+// → IFFT → 打包。帧驱动（分帧/hop/重叠相加）由外部 BlockOLA 承担。
 // 频谱算法通过 Process 模板传入（须提供 operator()），分析窗也
-// 作为参数显式传入（仅 Standard 用 sinc*hann，其余用 hann）。
+// 作为参数显式传入（仅 sinc smear 用 sinc*hann，其余用 hann）。
 class STFT {
 public:
     struct Params {
@@ -58,7 +53,7 @@ public:
         int fft_size{1024};
         float blend{0.2f};
         float formant_shift{0.0f};
-        float bandwidth{2.0f}; // Standard 的 sinc 分析窗带宽
+        float bandwidth{2.0f}; // sinc smear 的 sinc 分析窗带宽
     };
 
     void Init(float fs);
@@ -69,7 +64,8 @@ public:
     }
 
     // 单帧 STFT 处理：分析加窗 → FFT → 频谱处理(alg) → IFFT → 打包；
-    // window 为 mod 分析窗（hann 系用 hann_window_，Standard 用 window_）；carry 恒用 hann_window_。
+    // window 为 mod 分析窗（hann 系用 hann_window_，sinc smear 用 hann_sinc_window_）；
+    // carry 恒用 hann_window_。
     // alg 须提供 operator()(STFT&, real_in, imag_in, real_out, imag_out, channel)
     template <typename STFT_ALG>
     std::span<PackFloat2 const> Process(std::span<PackFloat2 const> main_frame, std::span<PackFloat2 const> side_frame,
@@ -104,12 +100,6 @@ public:
         return std::span<PackFloat2 const>{output_frame_};
     }
 
-    // Wiener 专用单帧处理：三个 FFT 输入（fft(mod*win)、fft(carry*win)、fft(carry)）。
-    // glitch=false 时 g 作用在 fft(carry*win)（与原 Process 一致）；glitch=true 时作用在 fft(carry)。
-    // 定义见 stft.cpp（IFFT 取哪个谱由 wiener.GetGlitch() 决定）。
-    std::span<PackFloat2 const> Process2(std::span<PackFloat2 const> main_frame,
-                                         std::span<PackFloat2 const> side_frame, STFTWiener& wiener);
-
     // 公共派生状态（算法 functor 经 self 读取）
     int fft_size_{};
     float sample_rate_{};
@@ -120,7 +110,7 @@ public:
     float hann_window_gain_{};
     float hann_sinc_window_gain_{};
 
-    // 窗（hann 分析与合成共用；window_ 仅 Standard 用作分析窗）
+    // 窗（hann 分析与合成共用；hann_sinc_window_ 仅 sinc smear 用作分析窗）
     std::vector<float> hann_window_{};
     std::vector<float> hann_sinc_window_{};
 
@@ -150,13 +140,10 @@ private:
     float bandwidth_{}; // 上次应用的 bandwidth（用于判断是否需重算 sinc*hann 窗）
     std::vector<float> temp_main_;
     std::vector<float> temp_side_;
-    std::vector<float> temp_carry_;
     std::vector<float> real_main_;
     std::vector<float> real_side_;
     std::vector<float> imag_main_;
     std::vector<float> imag_side_;
-    std::vector<float> real_carry_;
-    std::vector<float> imag_carry_;
     std::vector<PackFloat2> output_frame_;
 };
 
