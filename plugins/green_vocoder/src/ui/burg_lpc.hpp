@@ -24,7 +24,7 @@ private:
     ::ui::Dial attack_{"attack"};
     ::ui::Dial hold_{"hold"};
     ::ui::Dial release_{"release"};
-    ::ui::FlatCombobox block_size_;
+    ::ui::FlatCombobox block_time_;
 };
 
 } // namespace green_vocoder::ui

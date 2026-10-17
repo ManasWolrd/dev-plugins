@@ -21,8 +21,8 @@ BurgLPC::BurgLPC(AudioPluginAudioProcessor& processor)
     release_.BindParam(processor.params_.lpc_gain_release.ptr_);
     addAndMakeVisible(release_);
 
-    block_size_.BindParam(processor.params_.stft_size.ptr_);
-    addChildComponent(block_size_);
+    block_time_.BindParam(processor.params_.lpc_block_ms.ptr_);
+    addChildComponent(block_time_);
 
     MakeGui();
 }
@@ -42,7 +42,7 @@ void BurgLPC::resized() {
         release_.setBounds(top.removeFromLeft(50));
     }
     else {
-        block_size_.setBounds(b.removeFromLeft(80).withHeight(65).withSizeKeepingCentre(80, 35).reduced(2));
+        block_time_.setBounds(b.removeFromLeft(80).withHeight(65).withSizeKeepingCentre(80, 35).reduced(2));
         auto order_bound = b.removeFromLeft(80).withHeight(40).reduced(2);
         order_title_.setBounds(order_bound.removeFromTop(static_cast<int>(order_title_.getFont().getHeight())));
         order_.setBounds(order_bound);
@@ -60,7 +60,7 @@ void BurgLPC::MakeGui() {
     attack_.setVisible(!block_mode_);
     release_.setVisible(!block_mode_);
     hold_.setVisible(!block_mode_);
-    block_size_.setVisible(block_mode_);
+    block_time_.setVisible(block_mode_);
     resized();
 }
 

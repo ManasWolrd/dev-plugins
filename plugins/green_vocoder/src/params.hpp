@@ -225,6 +225,10 @@ public:
         "lpc_order", {4.0f, 80.0f, 4.0f},
          36.0f
     };
+    pluginshared::ChoiceParam lpc_block_ms{
+        "lpc_block", juce::StringArray{"12 ms", "16 ms", "20 ms"},
+         "20 ms"
+    };
 
     // stft
     pluginshared::FloatParam stft_bandwidth{
@@ -349,6 +353,7 @@ public:
         layout += lpc_gain_hold;
         layout += lpc_gain_release;
         layout += lpc_order;
+        layout += lpc_block_ms;
         layout += stft_bandwidth;
         layout += mfcc_nbands;
         layout += stft_release;
@@ -394,6 +399,7 @@ public:
         lpc_smooth.ptr_->addListener(&leaky_lpc_listener_);
         lpc_gain_attack.ptr_->addListener(&leaky_lpc_listener_);
         lpc_order.ptr_->addListener(&leaky_lpc_block_listener_);
+        lpc_block_ms.ptr_->addListener(&leaky_lpc_block_listener_);
         stft_bandwidth.ptr_->addListener(&stft_listener_);
         mfcc_nbands.ptr_->addListener(&stft_listener_);
         stft_release.ptr_->addListener(&stft_listener_);
@@ -409,7 +415,7 @@ public:
         stft_morph_ab.ptr_->addListener(&stft_listener_);
         stft_wiener_glitch.ptr_->addListener(&stft_listener_);
         stft_wiener_ab.ptr_->addListener(&stft_listener_);
-        stft_size.ptr_->addListener(&stft_block_listener_);
+        stft_size.ptr_->addListener(&stft_listener_);
         track_low.ptr_->addListener(&pitch_osc_listener_);
         track_high.ptr_->addListener(&pitch_osc_listener_);
         track_pitch.ptr_->addListener(&pitch_osc_listener_);
@@ -439,6 +445,7 @@ public:
         lpc_smooth.ptr_->removeListener(&leaky_lpc_listener_);
         lpc_gain_attack.ptr_->removeListener(&leaky_lpc_listener_);
         lpc_order.ptr_->removeListener(&leaky_lpc_block_listener_);
+        lpc_block_ms.ptr_->removeListener(&leaky_lpc_block_listener_);
         stft_bandwidth.ptr_->removeListener(&stft_listener_);
         mfcc_nbands.ptr_->removeListener(&stft_listener_);
         stft_release.ptr_->removeListener(&stft_listener_);
@@ -454,7 +461,7 @@ public:
         stft_morph_ab.ptr_->removeListener(&stft_listener_);
         stft_wiener_glitch.ptr_->removeListener(&stft_listener_);
         stft_wiener_ab.ptr_->removeListener(&stft_listener_);
-        stft_size.ptr_->removeListener(&stft_block_listener_);
+        stft_size.ptr_->removeListener(&stft_listener_);
         track_low.ptr_->removeListener(&pitch_osc_listener_);
         track_high.ptr_->removeListener(&pitch_osc_listener_);
         track_pitch.ptr_->removeListener(&pitch_osc_listener_);
@@ -470,7 +477,6 @@ private:
     LeakyLpcFlagListener leaky_lpc_listener_{should_update_leaky_lpc_};
     LeakyLpcFlagListener leaky_lpc_block_listener_{should_update_leaky_lpc_, &should_update_block_lpc_};
     StftFlagListener stft_listener_{should_update_stft_};
-    StftFlagListener stft_block_listener_{should_update_stft_, &should_update_block_lpc_};
     ChannelVocoderFlagListener channel_vocoder_listener_{should_update_channel_vocoder_};
     PitchOscFlagListener pitch_osc_listener_{should_update_pitch_osc_};
     FormantShiftFlagListener formant_shift_listener_{should_update_leaky_lpc_, should_update_block_lpc_,

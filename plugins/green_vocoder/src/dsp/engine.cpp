@@ -13,9 +13,26 @@ namespace {
 
 // OLA 输出重建增益（块 Burg）：hann 分析窗仅用于 LPC 分析，不参与输出重建；
 // 输出仅由 hann 合成窗重叠相加（hop=N/4），COLA 常数=Σhann=2。
-// STFT 的纯 WOLA 重建增益（=1/Σ_k w_a·w_s，随 fft_size 变）在 InitOla 里由实际窗
+// STFT 的纯 WOLA 重建增益（=1/Σ_k w_a·w_s，随 fft_size 变）在 InitStftOla 里由实际窗
 // 计算存于 stft_wola_gain_：分析窗归一化后 Σ=2，hann² 的 COLA=1.5 → 增益=N/6。
 constexpr float kBlockBurgGain = 0.25f;
+
+void FillHann(std::vector<float>& window, int block_size) {
+    window.resize(static_cast<size_t>(block_size));
+    for (int i = 0; i < block_size; ++i) {
+        window[static_cast<size_t>(i)] =
+            0.5f
+            - 0.5f
+                  * std::cos(2.0f * std::numbers::pi_v<float> * static_cast<float>(i) / static_cast<float>(block_size));
+    }
+}
+
+// 块时间 → 块长（采样）。hop = block/4，故块长取 4 的整数倍
+int BlockSizeFromMs(float ms, double sample_rate) {
+    int const samples =
+        static_cast<int>(std::lround(static_cast<double>(ms) * sample_rate / 1000.0 / 4.0)) * 4;
+    return std::max(samples, 4);
+}
 
 } // namespace
 
@@ -25,12 +42,13 @@ void Engine::Init(double sample_rate, int block_size) {
     sample_rate_ = sample_rate;
     float fs = static_cast<float>(sample_rate);
 
-    // 先初始化 STFT（重建归一化分析窗），再初始化共享 OLA，使 InitOla 能正确计算 WOLA 增益
+    // 先初始化 STFT（重建归一化分析窗），再初始化其 OLA，使 WOLA 增益可正确计算
     stft_.Init(fs);
-    InitOla(1024);
+    InitStftOla(1024);
     burg_lpc_.Init(fs, block_size);
     channel_vocoder_.Init(fs, block_size);
     block_burg_.Init(fs);
+    InitBlockBurgOla(BlockSizeFromMs(global::kBlockBurgDefaultMs, sample_rate));
     cepstrum_stft_.Init(stft_);
     mfcc_stft_.Init(stft_);
     smooth_stft_.Init(stft_);
@@ -51,29 +69,31 @@ void Engine::Reset() {}
 void Engine::UpdateStftWolaGain() {
     // 纯 WOLA 重建增益 = 1/Σ_k(w_a·w_s)：由归一化分析窗 × 普通 hann 合成窗计算
     // （hop=block/4，稳态任一点被 4 帧覆盖；hann² 的 COLA=1.5 → 增益=block_size/6）
-    if (stft_.hann_window_.size() != static_cast<size_t>(ola_block_size_))
+    if (stft_.hann_window_.size() != static_cast<size_t>(stft_ola_block_size_))
         return; // 分析窗未就绪或尺寸不匹配，保留旧值
-    int const hop = ola_block_size_ / 4;
+    int const hop = stft_ola_block_size_ / 4;
     double cola = 0.0;
     for (int k = 0; k < 4; ++k)
         cola += static_cast<double>(stft_.hann_window_[static_cast<size_t>(k * hop)]
-                                    * ola_window_[static_cast<size_t>(k * hop)]);
+                                    * stft_ola_window_[static_cast<size_t>(k * hop)]);
     stft_wola_gain_ = static_cast<float>(1.0 / cola);
 }
 
-void Engine::InitOla(int block_size) {
-    if (block_size == ola_block_size_)
+void Engine::InitStftOla(int block_size) {
+    if (block_size == stft_ola_block_size_)
         return;
-    ola_block_size_ = block_size;
-    ola_window_.resize(static_cast<size_t>(block_size));
-    for (int i = 0; i < block_size; ++i) {
-        ola_window_[static_cast<size_t>(i)] =
-            0.5f
-            - 0.5f
-                  * std::cos(2.0f * std::numbers::pi_v<float> * static_cast<float>(i) / static_cast<float>(block_size));
-    }
-    ola_.Init(block_size, block_size / 4, ola_window_);
+    stft_ola_block_size_ = block_size;
+    FillHann(stft_ola_window_, block_size);
+    stft_ola_.Init(block_size, block_size / 4, stft_ola_window_);
     UpdateStftWolaGain();
+}
+
+void Engine::InitBlockBurgOla(int block_size) {
+    if (block_size == block_burg_ola_block_size_)
+        return;
+    block_burg_ola_block_size_ = block_size;
+    FillHann(block_burg_ola_window_, block_size);
+    block_burg_ola_.Init(block_size, block_size / 4, block_burg_ola_window_);
 }
 
 void Engine::Update(Params& p) {
@@ -112,13 +132,14 @@ void Engine::Update(Params& p) {
 
         case eVocoderType_BlockBurgLPC:
             if (p.should_update_block_lpc_.exchange(false, std::memory_order_acq_rel)) {
-                int const block_size = global::kStftSizes[static_cast<size_t>(p.stft_size.Get())];
+                int const block_size =
+                    BlockSizeFromMs(global::kBlockBurgTimesMs[static_cast<size_t>(p.lpc_block_ms.Get())], sample_rate_);
                 block_burg_.SetParam({
                     .block_size = block_size,
                     .poles = static_cast<int>(p.lpc_order.Get()),
                     .formant_shift = p.shift_pitch.Get(), // 半音（st）
                 });
-                InitOla(block_size);
+                InitBlockBurgOla(block_size);
             }
             break;
 
@@ -153,8 +174,8 @@ void Engine::Update(Params& p) {
 
                 stft_mode_ = static_cast<dsp::STFTMode>(p.stft_type.Get());
 
-                InitOla(fft_size);
-                UpdateStftWolaGain(); // stft_.SetParam 刚重建分析窗，确保增益随新尺寸刷新（InitOla 可能 early-return）
+                InitStftOla(fft_size);
+                UpdateStftWolaGain(); // stft_.SetParam 刚重建分析窗，确保增益随新尺寸刷新（InitStftOla 可能 early-return）
             }
             break;
 
@@ -250,49 +271,49 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
                 case eVocoderType_STFTVocoder:
                     switch (stft_mode_) {
                         case dsp::STFTMode::Standard:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_sinc_window_, standard_stft_);
                                 });
                             break;
                         case dsp::STFTMode::Cepstrum:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, cepstrum_stft_);
                                 });
                             break;
                         case dsp::STFTMode::MFCC:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, mfcc_stft_);
                                 });
                             break;
                         case dsp::STFTMode::Smooth:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, smooth_stft_);
                                 });
                             break;
                         case dsp::STFTMode::Welch:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, welch_stft_);
                                 });
                             break;
                         case dsp::STFTMode::Morph:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process(mf, sf, stft_.hann_window_, morph_stft_);
                                 });
                             break;
                         case dsp::STFTMode::Wiener:
-                            ola_.Process(
+                            stft_ola_.Process(
                                 main, side, n, stft_wola_gain_,
                                 [this](std::span<dsp::PackFloat2 const> mf, std::span<dsp::PackFloat2 const> sf) {
                                     return stft_.Process2(mf, sf, wiener_stft_);
@@ -304,7 +325,7 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
                     channel_vocoder_.Process(main, side, n);
                     break;
                 case eVocoderType_BlockBurgLPC:
-                    ola_.Process(main, side, n, kBlockBurgGain, block_burg_);
+                    block_burg_ola_.Process(main, side, n, kBlockBurgGain, block_burg_);
                     break;
                 case eVocoderType_NumVocoderTypes:
                 default:
@@ -327,8 +348,10 @@ void Engine::Process(juce::AudioBuffer<float>& buffer, int mod_ch, int carry_ch,
     // latency
     {
         int new_latency = 0;
-        if (vocoder_type_ == eVocoderType_STFTVocoder || vocoder_type_ == eVocoderType_BlockBurgLPC)
+        if (vocoder_type_ == eVocoderType_STFTVocoder)
             new_latency = stft_.GetFFTSize();
+        else if (vocoder_type_ == eVocoderType_BlockBurgLPC)
+            new_latency = block_burg_ola_block_size_;
         latency_ = new_latency;
     }
 }

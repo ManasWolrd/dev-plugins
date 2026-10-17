@@ -15,6 +15,9 @@ static constexpr int kMaxDownsample = 8;
 
 // block burg lpc
 static constexpr int kMaxPoles = 80;
+// block burg 块时间选项（ms），与 params 中 lpc_block_ms 的 choice 顺序一致
+static constexpr std::array<float, 3> kBlockBurgTimesMs{12.0f, 16.0f, 20.0f};
+static constexpr float kBlockBurgDefaultMs = 20.0f;
 
 // 防止滤波器系数病态所需的微小噪声（leaky / block burg 使用）
 static constexpr float kNoiseGain = 1e-5f;

@@ -63,15 +63,17 @@ public:
         return sample_rate_;
     }
 private:
-    // 共享 OLA：按 block_size 重建（hann 合成窗，hop = block/4）
-    void InitOla(int block_size);
+    // STFT / block burg 各自独立的 OLA（hann 合成窗，hop = block/4）
+    void InitStftOla(int block_size);
+    void InitBlockBurgOla(int block_size);
     // 纯 WOLA 重建增益（由归一化分析窗 × 合成窗计算；分析窗未就绪/尺寸不匹配时保持旧值）
     void UpdateStftWolaGain();
 
     double sample_rate_{};
     dsp::TiltFilter pre_tilt_filter_;
     dsp::PitchOsc pitch_osc_;
-    dsp::BlockOLA<PackFloat2> ola_;
+    dsp::BlockOLA<PackFloat2> stft_ola_;
+    dsp::BlockOLA<PackFloat2> block_burg_ola_;
     dsp::STFT stft_;
     dsp::STFTStandard standard_stft_;
     dsp::STFTCepstrum cepstrum_stft_;
@@ -83,8 +85,10 @@ private:
     dsp::BlockBurgLPC block_burg_;
     dsp::ChannelVocoder channel_vocoder_;
     dsp::LeakyBurgLPC burg_lpc_;
-    std::vector<float> ola_window_;
-    int ola_block_size_{};
+    std::vector<float> stft_ola_window_;
+    std::vector<float> block_burg_ola_window_;
+    int stft_ola_block_size_{};
+    int block_burg_ola_block_size_{};
     float stft_wola_gain_{}; // STFT 纯 WOLA 重建增益（1/Σ_k w_a·w_s，随 fft_size 变，=N/6）
     dsp::STFTMode stft_mode_{dsp::STFTMode::Cepstrum};
 
