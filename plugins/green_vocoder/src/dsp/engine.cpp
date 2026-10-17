@@ -11,8 +11,8 @@
 
 namespace {
 
-// OLA 输出重建增益（块 Burg）：无分析窗，仅 hann 合成窗重叠相加（hop=N/4），
-// COLA 常数=Σhann=2。
+// OLA 输出重建增益（块 Burg）：hann 分析窗仅用于 LPC 分析，不参与输出重建；
+// 输出仅由 hann 合成窗重叠相加（hop=N/4），COLA 常数=Σhann=2。
 // STFT 的纯 WOLA 重建增益（=1/Σ_k w_a·w_s，随 fft_size 变）在 InitOla 里由实际窗
 // 计算存于 stft_wola_gain_：分析窗归一化后 Σ=2，hann² 的 COLA=1.5 → 增益=N/6。
 constexpr float kBlockBurgGain = 0.25f;
@@ -116,8 +116,6 @@ void Engine::Update(Params& p) {
                 block_burg_.SetParam({
                     .block_size = block_size,
                     .poles = static_cast<int>(p.lpc_order.Get()),
-                    .smear = p.lpc_smooth.Get(),
-                    .attack = p.lpc_gain_attack.Get(),
                     .formant_shift = p.shift_pitch.Get(), // 半音（st）
                 });
                 InitOla(block_size);

@@ -46,9 +46,6 @@ void BurgLPC::resized() {
         auto order_bound = b.removeFromLeft(80).withHeight(40).reduced(2);
         order_title_.setBounds(order_bound.removeFromTop(static_cast<int>(order_title_.getFont().getHeight())));
         order_.setBounds(order_bound);
-        auto block = b.removeFromTop(65);
-        smear_.setBounds(block.removeFromLeft(50));
-        attack_.setBounds(block.removeFromLeft(50));
     }
 }
 
@@ -59,6 +56,8 @@ void BurgLPC::SetBlockMode(bool block_mode) {
 
 void BurgLPC::MakeGui() {
     forget_.setVisible(!block_mode_);
+    smear_.setVisible(!block_mode_);
+    attack_.setVisible(!block_mode_);
     release_.setVisible(!block_mode_);
     hold_.setVisible(!block_mode_);
     block_size_.setVisible(block_mode_);

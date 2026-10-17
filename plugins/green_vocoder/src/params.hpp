@@ -391,8 +391,8 @@ public:
         lpc_forget.ptr_->addListener(&leaky_lpc_listener_);
         lpc_gain_hold.ptr_->addListener(&leaky_lpc_listener_);
         lpc_gain_release.ptr_->addListener(&leaky_lpc_listener_);
-        lpc_smooth.ptr_->addListener(&leaky_lpc_block_listener_);
-        lpc_gain_attack.ptr_->addListener(&leaky_lpc_block_listener_);
+        lpc_smooth.ptr_->addListener(&leaky_lpc_listener_);
+        lpc_gain_attack.ptr_->addListener(&leaky_lpc_listener_);
         lpc_order.ptr_->addListener(&leaky_lpc_block_listener_);
         stft_bandwidth.ptr_->addListener(&stft_listener_);
         mfcc_nbands.ptr_->addListener(&stft_listener_);
@@ -436,8 +436,8 @@ public:
         lpc_forget.ptr_->removeListener(&leaky_lpc_listener_);
         lpc_gain_hold.ptr_->removeListener(&leaky_lpc_listener_);
         lpc_gain_release.ptr_->removeListener(&leaky_lpc_listener_);
-        lpc_smooth.ptr_->removeListener(&leaky_lpc_block_listener_);
-        lpc_gain_attack.ptr_->removeListener(&leaky_lpc_block_listener_);
+        lpc_smooth.ptr_->removeListener(&leaky_lpc_listener_);
+        lpc_gain_attack.ptr_->removeListener(&leaky_lpc_listener_);
         lpc_order.ptr_->removeListener(&leaky_lpc_block_listener_);
         stft_bandwidth.ptr_->removeListener(&stft_listener_);
         mfcc_nbands.ptr_->removeListener(&stft_listener_);

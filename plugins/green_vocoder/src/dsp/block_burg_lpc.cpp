@@ -7,13 +7,12 @@
 #include <cstddef>
 #include <span>
 
-#include <qwqdsp/convert.hpp>
 #include <qwqdsp/misc/smoother.hpp>
+#include <qwqdsp/window/hann.hpp>
 
 namespace green_vocoder::dsp {
 
 using global::kMaxPoles;
-using global::kRidge;
 
 using PackFloat2 = qwqdsp_simd_element::PackFloat<2>;
 
@@ -28,14 +27,23 @@ void BlockBurgLPC::SetParam(const Params& p) {
         fft_size_ = p.block_size;
         eb_.resize(static_cast<size_t>(p.block_size));
         ef_.resize(static_cast<size_t>(p.block_size));
+
+        // 分析 hann 窗；window_norm_ = sqrt(Σw²)，用于把加窗后的残差能量换算回原始 RMS
+        hann_window_.resize(static_cast<size_t>(p.block_size));
+        qwqdsp_window::Hann::Window(hann_window_, true);
+        float window_energy = 0.0f;
+        for (float const w : hann_window_) window_energy += w * w;
+        window_norm_ = std::sqrt(window_energy);
     }
 
     update_rate_ = sample_rate_ / (static_cast<float>(fft_size_) / 4.0f);
 
     num_poles_ = p.poles;
 
-    smear_factor_ = qwqdsp_misc::ExpSmoother::ComputeSmoothFactor(std::max(p.smear, 10.0f), update_rate_);
-    attack_factor_ = qwqdsp_misc::ExpSmoother::ComputeSmoothFactor(p.attack, update_rate_);
+    // 衰减平滑自动跟随块大小：时间常数取一个分析块（fft_size 个采样），
+    // 使不同块大小下的时间平滑行为一致
+    float const block_ms = 1000.0f * static_cast<float>(fft_size_) / sample_rate_;
+    attack_factor_ = qwqdsp_misc::ExpSmoother::ComputeSmoothFactor(block_ms, update_rate_);
 
     // formant_shift 为半音（st），归一化到全通系数范围（st=±12 → ±0.99）
     fir_allpass_coeff_ = std::clamp(-p.formant_shift / 12.0f, -0.99f, 0.99f);
@@ -43,13 +51,21 @@ void BlockBurgLPC::SetParam(const Params& p) {
 
 std::span<PackFloat2 const> BlockBurgLPC::operator()(std::span<PackFloat2 const> main,
                                                      std::span<PackFloat2 const> side) {
-    // 岭回归常数：防止 down≈0 时反射系数 k = -2*up/(down+λ) 病态
-    PackFloat2 ridge{};
-    ridge.Broadcast(kRidge);
+    // 逐帧去均值（直流）后加 hann 分析窗；再注入微小噪声，防止反射系数
+    // k = -2*up/down 在静音时病态（同 LeakyBurgLPC）
+    PackFloat2 mean{};
+    for (auto const& x : main) mean += x;
+    mean *= 1.0f / static_cast<float>(main.size());
+    for (int i = 0; i < static_cast<int>(main.size()); ++i) {
+        auto x = main[static_cast<size_t>(i)];
+        x -= mean;
+        x *= hann_window_[static_cast<size_t>(i)];
+        x += noise_.Next() * global::kNoiseGain;
+        ef_[static_cast<size_t>(i)] = x;
+        eb_[static_cast<size_t>(i)] = x;
+    }
 
     // forward fir lattice
-    std::copy(main.begin(), main.end(), ef_.begin());
-    std::copy(main.begin(), main.end(), eb_.begin());
     std::array<PackFloat2, kMaxPoles> latticek{};
     for (int kidx = 0; kidx < num_poles_; ++kidx) {
         auto& k = latticek[static_cast<size_t>(kidx)];
@@ -65,7 +81,7 @@ std::span<PackFloat2 const> BlockBurgLPC::operator()(std::span<PackFloat2 const>
             down += ef_[static_cast<size_t>(i)] * ef_[static_cast<size_t>(i)];
             down += y * y;
         }
-        k = -2.0f * up / (down + ridge);
+        k = -2.0f * up / down;
 
         for (int i = 0; i < static_cast<int>(ef_.size()); ++i) {
             auto upgo = ef_[static_cast<size_t>(i)] + eb_[static_cast<size_t>(i)] * k;
@@ -74,20 +90,8 @@ std::span<PackFloat2 const> BlockBurgLPC::operator()(std::span<PackFloat2 const>
             eb_[static_cast<size_t>(i)] = downgo;
         }
     }
-    // smear
     // the FIR and IIR lattice coeffient are reversed
-    auto reverse_fir_k = latticek.begin() + num_poles_;
-    auto iir_k = latticek_.begin();
-    for (int order = 0; order < num_poles_; order += 2) {
-        auto const& fir_1 = *(--reverse_fir_k);
-        auto const& fir_2 = *(--reverse_fir_k);
-        auto& iir_1 = *(iir_k++);
-        auto& iir_2 = *(iir_k++);
-        iir_1 *= smear_factor_;
-        iir_2 *= smear_factor_;
-        iir_1 += fir_1 * (1.0f - smear_factor_);
-        iir_2 += fir_2 * (1.0f - smear_factor_);
-    }
+    std::reverse_copy(latticek.begin(), latticek.begin() + num_poles_, latticek_.begin());
     // eval gain
     PackFloat2 gain{};
     for (int i = 0; i < static_cast<int>(ef_.size()); ++i) {
@@ -95,7 +99,7 @@ std::span<PackFloat2 const> BlockBurgLPC::operator()(std::span<PackFloat2 const>
     }
     gain = qwqdsp_simd_element::PackOps::Sqrt(gain);
     PackFloat2 gain_side{};
-    gain_side.Broadcast(std::sqrt(static_cast<float>(fft_size_)));
+    gain_side.Broadcast(window_norm_);
     auto atten = gain / (gain_side);
     // atten smooth
     gain_lag_ *= attack_factor_;
