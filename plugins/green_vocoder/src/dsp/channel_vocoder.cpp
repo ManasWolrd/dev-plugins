@@ -1,5 +1,4 @@
 #include "channel_vocoder.hpp"
-#include <algorithm>
 #include <cassert>
 #include <cmath>
 #include <cstddef>
@@ -9,29 +8,11 @@
 
 namespace green_vocoder::dsp {
 
-using Pack4 = qwqdsp_simd_element::PackFloat<4>;
-using Pack4CRef = qwqdsp_simd_element::PackFloatCRef<4>;
 using ZPK = qwqdsp_filter::IIRDesign::ZPK;
-using BiquadCoeff = qwqdsp_filter::BiquadCoeff;
 
 namespace {
 bool ParamChanged(float a, float b) noexcept {
     return std::abs(a - b) > 0.0f;
-}
-
-// TPT SVF 带通（MakeBandpass）的 TDF2 等效系数：
-// g = tan(pi*fc/fs)（这里由设计函数给出），R = 1/Q
-std::array<BiquadCoeff, 4> MakeBandpassCoeffs(Pack4 const& g, Pack4 const& Q) noexcept {
-    auto const r2 = 1.0f / Q;
-    auto const d = 1.0f / (1.0f + r2 * g + g * g);
-    auto const b0 = d * g * r2;
-    auto const a1 = -2.0f * d * (1.0f - g * g);
-    auto const a2 = -1.0f + 2.0f * d * (1.0f + g * g);
-    std::array<BiquadCoeff, 4> coeff;
-    for (size_t i = 0; i < 4; ++i) {
-        coeff[i] = {b0[i], 0.0f, -b0[i], a1[i], a2[i]};
-    }
-    return coeff;
 }
 } // namespace
 
@@ -45,12 +26,16 @@ void ChannelVocoder::SetParam(const Params& p) {
     assert(p.num_bands % 4 == 0);
 
     float const new_carry_w_mul = std::exp2(p.formant_shift / 12.0f);
+    bool const mode_changed = filter_bank_mode_ != p.filter_bank_mode;
+    bool const bands_changed = num_bans_ != p.num_bands;
+    bool const map_changed = map_ != p.map;
+    // 只有拓扑/频带布局变化才清空状态；其余参数只更新系数
+    bool const reset_filters = need_filter_update_ || mode_changed || bands_changed || map_changed;
     bool const filters_changed =
-        need_filter_update_ || filter_bank_mode_ != p.filter_bank_mode || num_bans_ != p.num_bands
+        need_filter_update_ || mode_changed || bands_changed || map_changed
         || ParamChanged(freq_begin_, p.freq_begin) || ParamChanged(freq_end_, p.freq_end)
         || ParamChanged(scale_, p.modulator_scale) || ParamChanged(carry_scale_, p.carry_scale)
-        || ParamChanged(filter_ripple_, p.ripple) || ParamChanged(carry_w_mul_, new_carry_w_mul)
-        || map_ != p.map;
+        || ParamChanged(filter_ripple_, p.ripple) || ParamChanged(carry_w_mul_, new_carry_w_mul);
 
     filter_bank_mode_ = p.filter_bank_mode;
     num_bans_ = p.num_bands;
@@ -73,9 +58,11 @@ void ChannelVocoder::SetParam(const Params& p) {
     if (filters_changed) {
         need_filter_update_ = false;
         UpdateFilters();
-        for (auto& f : filters_) {
-            f.first.Reset();
-            f.second.Reset();
+        if (reset_filters) {
+            for (auto& f : filters_) {
+                f.first.Reset();
+                f.second.Reset();
+            }
         }
     }
 }
@@ -86,11 +73,11 @@ struct LogMap {
         return std::log(freq);
     }
 
-    static Pack4 ToFreq(Pack4 log) {
+    static qwqdsp_simd_element::PackFloat<4> ToFreq(qwqdsp_simd_element::PackFloat<4> log) {
         return qwqdsp_simd_element::PackOps::Exp(log);
     }
 
-    static Pack4 FromFreq(Pack4 log) {
+    static qwqdsp_simd_element::PackFloat<4> FromFreq(qwqdsp_simd_element::PackFloat<4> log) {
         return qwqdsp_simd_element::PackOps::Log(log);
     }
 
@@ -100,7 +87,7 @@ struct LogMap {
 };
 
 struct MelMap {
-    static Pack4 FromFreq(Pack4 freq) {
+    static qwqdsp_simd_element::PackFloat<4> FromFreq(qwqdsp_simd_element::PackFloat<4> freq) {
         return 1127.0f * qwqdsp_simd_element::PackOps::Log(1.0f + freq / 700.0f);
     }
 
@@ -108,7 +95,7 @@ struct MelMap {
         return 1127.0f * std::log(1.0f + freq / 700.0f);
     }
 
-    static Pack4 ToFreq(Pack4 mel) {
+    static qwqdsp_simd_element::PackFloat<4> ToFreq(qwqdsp_simd_element::PackFloat<4> mel) {
         return 700.0f * (qwqdsp_simd_element::PackOps::Exp(mel / 1127.0f) - 1.0f);
     }
 
@@ -118,7 +105,7 @@ struct MelMap {
 };
 
 struct LinearMap {
-    static Pack4 FromFreq(Pack4 freq) {
+    static qwqdsp_simd_element::PackFloat<4> FromFreq(qwqdsp_simd_element::PackFloat<4> freq) {
         return freq;
     }
 
@@ -126,7 +113,7 @@ struct LinearMap {
         return freq;
     }
 
-    static Pack4 ToFreq(Pack4 freq) {
+    static qwqdsp_simd_element::PackFloat<4> ToFreq(qwqdsp_simd_element::PackFloat<4> freq) {
         return freq;
     }
 
@@ -197,96 +184,104 @@ void ChannelVocoder::UpdateFilters() {
 
 // -------------------- filter designs --------------------
 struct Bandpass12 {
-    static void Design(CascadeBPTDF2& cascade, [[maybe_unused]] std::span<ZPK const> prototype, Pack4CRef w1,
-                       Pack4CRef w2, float analog_w_mul,
+    static void Design(CascadeBPSVF& svf, [[maybe_unused]] std::span<ZPK const> prototype,
+                       qwqdsp_simd_element::PackFloatCRef<4> w1,
+                       qwqdsp_simd_element::PackFloatCRef<4> w2, float analog_w_mul,
                        [[maybe_unused]] float ripple, [[maybe_unused]] float sample_rate) noexcept {
-        auto const f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
-        auto const f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
-        auto const f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
-        auto const Q = f0 / qwqdsp_simd_element::PackOps::Abs(f2 - f1);
-        auto const coeff = MakeBandpassCoeffs(f0, Q);
-        cascade.SetSection(0, coeff);
-        cascade.SetSection(1, coeff);
-        cascade.SetOutputGain(Pack4::vBroadcast(1.0f));
+        auto f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
+        auto f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
+        auto f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
+        // // this Q only works for a order4 bandpass to create -6dB gain
+        auto Q = f0 / qwqdsp_simd_element::PackOps::Abs(f2 - f1);
+        svf.svf_[0].MakeBandpass(f0, Q, f0, Q);
+
+        // auto half_power = std::sqrt(std::numbers::sqrt2_v<float> / 2.0f);
+        // auto w_pow_2 = qwqdsp_simd_element::PackOps::X2(f1 / f0);
+        // auto Q = qwqdsp_simd_element::PackOps::Sqrt(w_pow_2 / half_power - w_pow_2)
+        //        / qwqdsp_simd_element::PackOps::Abs(w_pow_2 - 1.0f);
+        // svf.svf_[0].MakeBandpass(f0, Q, f0, Q);
     }
 };
 
 struct StackButterworth24 {
-    static void Design(CascadeBPTDF2& cascade, [[maybe_unused]] std::span<ZPK const> prototype, Pack4CRef w1,
-                       Pack4CRef w2, float analog_w_mul,
+    static void Design(CascadeBPSVF& svf, [[maybe_unused]] std::span<ZPK const> prototype,
+                       qwqdsp_simd_element::PackFloatCRef<4> w1,
+                       qwqdsp_simd_element::PackFloatCRef<4> w2, float analog_w_mul,
                        [[maybe_unused]] float ripple, [[maybe_unused]] float sample_rate) noexcept {
-        auto const f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
-        auto const f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
-        auto const f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
-        constexpr float half_power = std::numbers::sqrt2_v<float> * 0.5f;
-        auto const w_pow_2 = qwqdsp_simd_element::PackOps::X2(f1 / f0);
-        auto const Q = qwqdsp_simd_element::PackOps::Sqrt(w_pow_2 / half_power - w_pow_2)
-                     / qwqdsp_simd_element::PackOps::Abs(w_pow_2 - 1.0f);
-        auto const coeff = MakeBandpassCoeffs(f0, Q);
-        for (size_t i = 0; i < 4; ++i) {
-            cascade.SetSection(i, coeff);
-        }
-        cascade.SetOutputGain(Pack4::vBroadcast(1.0f));
+        auto f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
+        auto f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
+        auto f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
+        // power of a order2 bandpass
+        [[maybe_unused]] constexpr auto power = 0.5f;
+        // sqrt it then we cascade 4 will make it at -6dB at gain response
+        // using fomula of a power function of a normalized bandpass
+        // Notice!: w and Q are all analog variable, w=w/wc
+        //
+        //                           w^2/Q^2                w^2
+        // power(w) = |H(s)|^2 = ------------------ = -------------------
+        //                       1-2w^2+w^2/Q^2+w^4    Q^2(w^2-1)^2+w^2
+        //
+        // to let f1(digital is w1)'s power match the power we want
+        // take w = f1/f0 and solve Q
+        constexpr auto half_power = std::numbers::sqrt2_v<float> * 0.5f;
+        auto w_pow_2 = qwqdsp_simd_element::PackOps::X2(f1 / f0);
+        auto Q = qwqdsp_simd_element::PackOps::Sqrt(w_pow_2 / half_power - w_pow_2)
+               / qwqdsp_simd_element::PackOps::Abs(w_pow_2 - 1.0f);
+        svf.svf_[0].MakeBandpass(f0, Q, f0, Q);
+        svf.svf_[1].MakeBandpass(f0, Q, f0, Q);
     }
 };
 
 struct StackButterworth36 {
-    static void Design(CascadeBPTDF2& cascade, [[maybe_unused]] std::span<ZPK const> prototype, Pack4CRef w1,
-                       Pack4CRef w2, float analog_w_mul,
+    static void Design(CascadeBPSVF& svf, [[maybe_unused]] std::span<ZPK const> prototype,
+                       qwqdsp_simd_element::PackFloatCRef<4> w1,
+                       qwqdsp_simd_element::PackFloatCRef<4> w2, float analog_w_mul,
                        [[maybe_unused]] float ripple, [[maybe_unused]] float sample_rate) noexcept {
-        auto const f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
-        auto const f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
-        auto const f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
-        constexpr float half_power = 0.793700526f;
-        auto const w_pow_2 = qwqdsp_simd_element::PackOps::X2(f1 / f0);
-        auto const Q = qwqdsp_simd_element::PackOps::Sqrt(w_pow_2 / half_power - w_pow_2)
-                     / qwqdsp_simd_element::PackOps::Abs(w_pow_2 - 1.0f);
-        auto const coeff = MakeBandpassCoeffs(f0, Q);
-        for (size_t i = 0; i < 6; ++i) {
-            cascade.SetSection(i, coeff);
-        }
-        cascade.SetOutputGain(Pack4::vBroadcast(1.0f));
+        auto f1 = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
+        auto f2 = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
+        auto f0 = qwqdsp_simd_element::PackOps::Sqrt(f1 * f2);
+        constexpr auto half_power = 0.793700526f;
+        auto w_pow_2 = qwqdsp_simd_element::PackOps::X2(f1 / f0);
+        auto Q = qwqdsp_simd_element::PackOps::Sqrt(w_pow_2 / half_power - w_pow_2)
+               / qwqdsp_simd_element::PackOps::Abs(w_pow_2 - 1.0f);
+        svf.svf_[0].MakeBandpass(f0, Q, f0, Q);
+        svf.svf_[1].MakeBandpass(f0, Q, f0, Q);
+        svf.svf_[2].MakeBandpass(f0, Q, f0, Q);
     }
 };
 
+using PackState = std::array<ZPK, 4>;
+
 struct PrototypedDesigner {
-    // prototype 为 1rad/s 模拟原型（每次滤波器重建只计算一次），
-    // 这里只对每个频带做 bandpass 映射、双线性变换和增益重分配。
-    static void Design(CascadeBPTDF2& cascade, std::span<ZPK const> prototype, Pack4CRef w1, Pack4CRef w2,
-                       float analog_w_mul, [[maybe_unused]] float ripple, float sample_rate) {
+    // prototype 为 1rad/s 模拟原型（每次滤波器重建只计算一次）；
+    // 这里只对每个频带做 bandpass 映射并配置 SVF。
+    static void Design(CascadeBPSVF& svf, std::span<ZPK const> prototype,
+                       qwqdsp_simd_element::PackFloatCRef<4> w1, qwqdsp_simd_element::PackFloatCRef<4> w2,
+                       float analog_w_mul, [[maybe_unused]] float ripple,
+                       [[maybe_unused]] float sample_rate) {
         size_t const num_prototype = prototype.size();
+        std::array<PackState, 6> states;
         std::array<ZPK, 6> prototype_buffer;
         std::copy(prototype.begin(), prototype.end(), prototype_buffer.begin());
 
-        std::array<std::array<BiquadCoeff, 4>, 6> section_coeffs;
-        std::array<float, 4> output_gain{};
-
-        auto const w1_analog =
-            qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul * (2.0f * sample_rate);
-        auto const w2_analog =
-            qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul * (2.0f * sample_rate);
+        auto const w1_analog = qwqdsp_simd_element::PackOps::Tan(w1 * 0.5f) * analog_w_mul;
+        auto const w2_analog = qwqdsp_simd_element::PackOps::Tan(w2 * 0.5f) * analog_w_mul;
         for (int lane = 0; lane < 4; ++lane) {
             std::array<ZPK, 6> zpk_buffer = prototype_buffer;
             auto const sections = std::span<ZPK>{zpk_buffer.data(), num_prototype * 2};
-            qwqdsp_filter::IIRDesign::ProtyleToBandpass2(sections, num_prototype,
-                                                         w1_analog[static_cast<size_t>(lane)],
-                                                         w2_analog[static_cast<size_t>(lane)]);
-            qwqdsp_filter::IIRDesign::Bilinear(sections, sample_rate);
-            // 重新分配各 SOS 的增益项，避免高 Q/窄带时出现 1e±N 的节增益
-            output_gain[static_cast<size_t>(lane)] = static_cast<float>(
-                qwqdsp_filter::IIRDesign::NormalizeSectionGains(sections));
+            qwqdsp_filter::IIRDesign::ProtyleToBandpass2(
+                sections, num_prototype, w1_analog[static_cast<size_t>(lane)],
+                w2_analog[static_cast<size_t>(lane)]);
 
-            std::array<BiquadCoeff, 6> biquad;
-            qwqdsp_filter::IIRDesign::TfToBiquad(sections, std::span<BiquadCoeff>{biquad.data(), num_prototype * 2});
-            for (size_t i = 0; i < num_prototype * 2; ++i) {
-                section_coeffs[i][static_cast<size_t>(lane)] = biquad[i];
+            for (size_t j = 0; j < num_prototype; ++j) {
+                states[2 * j][static_cast<size_t>(lane)] = zpk_buffer[j];
+                states[2 * j + 1][static_cast<size_t>(lane)] = zpk_buffer[j + num_prototype];
             }
         }
 
-        for (size_t i = 0; i < num_prototype * 2; ++i) {
-            cascade.SetSection(i, section_coeffs[i]);
+        for (size_t j = 0; j < num_prototype; ++j) {
+            svf.svf_[j].SetAnalogPoleZero(states[2 * j], states[2 * j + 1]);
         }
-        cascade.SetOutputGain({output_gain[0], output_gain[1], output_gain[2], output_gain[3]});
     }
 };
 
@@ -328,15 +323,16 @@ void ChannelVocoder::_UpdateFilters2() {
 
     int filter_idx = 0;
     auto const prototype = std::span<ZPK const>{prototype_.data(), prototype_sections_};
-    auto const min_w = Pack4::vBroadcast(qwqdsp::convert::Freq2W(10.0f, sample_rate_));
-    auto const max_w = Pack4::vBroadcast(qwqdsp::convert::Freq2W(sample_rate_ * 0.5f - 100.0f, sample_rate_));
+    auto const min_w = qwqdsp_simd_element::PackFloat<4>::vBroadcast(qwqdsp::convert::Freq2W(10.0f, sample_rate_));
+    auto const max_w = qwqdsp_simd_element::PackFloat<4>::vBroadcast(
+        qwqdsp::convert::Freq2W(sample_rate_ * 0.5f - 100.0f, sample_rate_));
     for (int i = 0; i < num_bans_; i += 4) {
-        Pack4 end_omega{
+        qwqdsp_simd_element::PackFloat<4> end_omega{
             pitch_begin + pitch_interval * (i + 1), pitch_begin + pitch_interval * (i + 2),
             pitch_begin + pitch_interval * (i + 3), pitch_begin + pitch_interval * (i + 4)};
         end_omega = AssignMap::ToFreq(end_omega);
         end_omega = std::numbers::pi_v<float> * 2.0f * end_omega / sample_rate_;
-        Pack4 prev_omega{begin, end_omega[0], end_omega[1], end_omega[2]};
+        qwqdsp_simd_element::PackFloat<4> prev_omega{begin, end_omega[0], end_omega[1], end_omega[2]};
         begin = end_omega[3];
 
         auto center = (prev_omega + end_omega) * 0.5f;
@@ -363,39 +359,39 @@ void ChannelVocoder::Process(qwqdsp_simd_element::PackFloat<2>* main, qwqdsp_sim
                              int num_samples) {
     switch (filter_bank_mode_) {
         case FilterBankMode::Bandpass12:
-            _ProcessBlock<2>(main, side, num_samples);
+            _ProcessBlock<2, true>(main, side, num_samples);
             break;
         case FilterBankMode::StackButterworth24:
-            _ProcessBlock<4>(main, side, num_samples);
+            _ProcessBlock<4, true>(main, side, num_samples);
             break;
         case FilterBankMode::StackButterworth36:
-            _ProcessBlock<6>(main, side, num_samples);
+            _ProcessBlock<6, true>(main, side, num_samples);
             break;
         case FilterBankMode::FlatButterworth24:
         case FilterBankMode::Chebyshev24:
         case FilterBankMode::Elliptic24:
-            _ProcessBlock<4>(main, side, num_samples);
+            _ProcessBlock<4, false>(main, side, num_samples);
             break;
         case FilterBankMode::FlatButterworth36:
         case FilterBankMode::Chebyshev36:
         case FilterBankMode::Elliptic36:
-            _ProcessBlock<6>(main, side, num_samples);
+            _ProcessBlock<6, false>(main, side, num_samples);
             break;
     }
 }
 
-template <size_t kFilterNumbers>
+template <size_t kFilterNumbers, bool kOnlyPole>
 void ChannelVocoder::_ProcessBlock(qwqdsp_simd_element::PackFloat<2>* main, qwqdsp_simd_element::PackFloat<2>* side,
                                    int num_samples) {
     std::fill_n(output_.begin(), num_samples, qwqdsp_simd_element::PackFloat<2>{});
-    auto vgate_peak = Pack4::vBroadcast(gate_peak_);
+    auto vgate_peak = qwqdsp_simd_element::PackFloat<4>::vBroadcast(gate_peak_);
     for (int filter_idx = 0; filter_idx < num_filters_; ++filter_idx) {
         for (int sample_idx = 0; sample_idx < num_samples; ++sample_idx) {
             // filtering
-            Pack4 main_l;
-            Pack4 main_r;
-            Pack4 side_l;
-            Pack4 side_r;
+            qwqdsp_simd_element::PackFloat<4> main_l;
+            qwqdsp_simd_element::PackFloat<4> main_r;
+            qwqdsp_simd_element::PackFloat<4> side_l;
+            qwqdsp_simd_element::PackFloat<4> side_r;
             main_l.Broadcast(main[sample_idx][0]);
             main_r.Broadcast(main[sample_idx][1]);
             side_l.Broadcast(side[sample_idx][0]);
@@ -405,22 +401,26 @@ void ChannelVocoder::_ProcessBlock(qwqdsp_simd_element::PackFloat<2>* main, qwqd
             side_l *= gain_;
             side_r *= gain_;
             auto& filter_bind = filters_[static_cast<size_t>(filter_idx)];
-            filter_bind.first.Tick<kFilterNumbers>(main_l, main_r);
-            filter_bind.second.Tick<kFilterNumbers>(side_l, side_r);
+            filter_bind.first.Tick<kFilterNumbers, kOnlyPole>(main_l, main_r);
+            filter_bind.second.Tick<kFilterNumbers, kOnlyPole>(side_l, side_r);
             // envelope follower
             auto curr = main_peaks_[static_cast<size_t>(filter_idx)];
             main_l = qwqdsp_simd_element::PackOps::Abs(main_l);
             main_r = qwqdsp_simd_element::PackOps::Abs(main_r);
-            main_l = qwqdsp_simd_element::PackOps::Select(main_l > vgate_peak, main_l, Pack4::vBroadcast(0.0f));
-            main_r = qwqdsp_simd_element::PackOps::Select(main_r > vgate_peak, main_r, Pack4::vBroadcast(0.0f));
+            main_l = qwqdsp_simd_element::PackOps::Select(main_l > vgate_peak, main_l,
+                                                          qwqdsp_simd_element::PackFloat<4>::vBroadcast(0.0f));
+            main_r = qwqdsp_simd_element::PackOps::Select(main_r > vgate_peak, main_r,
+                                                          qwqdsp_simd_element::PackFloat<4>::vBroadcast(0.0f));
             auto lag_l = curr[0];
             auto lag_r = curr[1];
             auto coeff_mask_l = main_l > lag_l;
             auto coeff_mask_r = main_r > lag_r;
-            auto coeff_l = qwqdsp_simd_element::PackOps::Select(coeff_mask_l, Pack4::vBroadcast(attack_),
-                                                                Pack4::vBroadcast(release_));
-            auto coeff_r = qwqdsp_simd_element::PackOps::Select(coeff_mask_r, Pack4::vBroadcast(attack_),
-                                                                Pack4::vBroadcast(release_));
+            auto coeff_l = qwqdsp_simd_element::PackOps::Select(
+                coeff_mask_l, qwqdsp_simd_element::PackFloat<4>::vBroadcast(attack_),
+                qwqdsp_simd_element::PackFloat<4>::vBroadcast(release_));
+            auto coeff_r = qwqdsp_simd_element::PackOps::Select(
+                coeff_mask_r, qwqdsp_simd_element::PackFloat<4>::vBroadcast(attack_),
+                qwqdsp_simd_element::PackFloat<4>::vBroadcast(release_));
             lag_l *= coeff_l;
             lag_r *= coeff_r;
             lag_l += (1.0f - coeff_l) * main_l;
